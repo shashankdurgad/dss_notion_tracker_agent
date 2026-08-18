@@ -123,13 +123,43 @@ a { color: var(--accent); overflow-wrap: anywhere; }
 /* ---------- messages ---------- */
 .msg { display: flex; flex-direction: column; gap: 0.5rem; }
 .msg-role { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-.msg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg-text { overflow-wrap: anywhere; }
+
+/* User text is rendered verbatim, so keep its newlines. Assistant text is
+   Markdown-rendered into real block elements and must NOT pre-wrap, or every
+   paragraph gains phantom blank lines. */
 .msg-user .msg-text {
+  white-space: pre-wrap;
   background: var(--accent-soft);
   border-radius: var(--radius);
   padding: 0.6rem 0.85rem;
   align-self: flex-start;
 }
+
+/* ---------- rendered markdown ---------- */
+.msg-assistant .msg-text > :first-child { margin-top: 0; }
+.msg-assistant .msg-text > :last-child { margin-bottom: 0; }
+.msg-assistant .msg-text p { margin: 0 0 0.7rem; }
+.msg-assistant .msg-text ul,
+.msg-assistant .msg-text ol { margin: 0 0 0.7rem; padding-left: 1.35rem; }
+.msg-assistant .msg-text li { margin: 0.15rem 0; }
+.msg-assistant .msg-text h3,
+.msg-assistant .msg-text h4,
+.msg-assistant .msg-text h5,
+.msg-assistant .msg-text h6 {
+  margin: 1rem 0 0.4rem;
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+.msg-assistant .msg-text code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.08em 0.32em;
+}
+.msg-assistant .msg-text strong { font-weight: 650; }
 .msg-error { color: var(--danger); font-size: 0.9rem; }
 .thinking { color: var(--muted); font-size: 0.85rem; }
 

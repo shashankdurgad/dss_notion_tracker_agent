@@ -1,19 +1,6 @@
+import { renderMarkdown } from "../markdown";
 import type { ChatMessage } from "../types";
 import ToolChip from "./ToolChip";
-
-/** Linkify bare URLs so Notion references are clickable. */
-function renderText(text: string) {
-  const parts = text.split(/(https?:\/\/[^\s)>\]]+)/g);
-  return parts.map((part, i) =>
-    /^https?:\/\//.test(part) ? (
-      <a key={i} href={part} target="_blank" rel="noopener noreferrer">
-        {part}
-      </a>
-    ) : (
-      <span key={i}>{part}</span>
-    ),
-  );
-}
 
 export default function Message({
   message,
@@ -36,7 +23,15 @@ export default function Message({
         </div>
       )}
 
-      {message.text && <div className="msg-text">{renderText(message.text)}</div>}
+      {message.text && (
+        <div className="msg-text">
+          {/* Only assistant replies are Markdown. A user's own text is shown
+              verbatim so typed asterisks or hashes aren't reinterpreted. */}
+          {message.role === "assistant"
+            ? renderMarkdown(message.text)
+            : message.text}
+        </div>
+      )}
 
       {message.error && (
         <div className="msg-error" role="alert">
