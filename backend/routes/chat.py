@@ -78,5 +78,5 @@ async def reset(
     user_id: str = Depends(current_user),
     state: AppState = Depends(get_state),
 ) -> dict:
-    state.agent.reset(user_id)
+    await state.agent.reset(user_id)
     return {"ok": True}

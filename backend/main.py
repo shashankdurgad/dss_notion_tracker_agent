@@ -25,16 +25,20 @@ async def lifespan(app: FastAPI):
     settings = app.state.app_state.settings
     logger.info("DSS Notion agent starting (model=%s)", settings.gemini_model)
 
-    # Register the OAuth client once at boot so the first /auth/login is fast
-    # and a misconfiguration surfaces here rather than mid-flow.
-    try:
-        client_id = await app.state.app_state.oauth.ensure_registered()
-        logger.info("Notion MCP OAuth client ready: %s", client_id)
-    except Exception:  # noqa: BLE001 - non-fatal; retried on first login
-        logger.warning(
-            "OAuth pre-registration failed; will retry on first login",
-            exc_info=True,
-        )
+    # On a persistent server, register the OAuth client at boot so the first
+    # /auth/login is fast and a misconfiguration surfaces here rather than
+    # mid-flow. On serverless this would run on every cold start and add
+    # latency to unrelated requests, so it's deferred to the login path
+    # (which caches the registration in shared storage anyway).
+    if not settings.uses_redis:
+        try:
+            client_id = await app.state.app_state.oauth.ensure_registered()
+            logger.info("Notion MCP OAuth client ready: %s", client_id)
+        except Exception:  # noqa: BLE001 - non-fatal; retried on first login
+            logger.warning(
+                "OAuth pre-registration failed; will retry on first login",
+                exc_info=True,
+            )
 
     try:
         yield

@@ -79,9 +79,9 @@ async def test_gives_up_and_rewinds_history(monkeypatch):
 
     assert events[-1]["type"] == "error"
     assert "capacity" in events[-1]["message"].lower()
-    # History must not end on an unanswered user turn, or the retry sends a
-    # malformed conversation.
-    history = agent.session("u1").history
+    # The rewind must be *persisted*, not just applied in memory — otherwise
+    # the next request reloads a history ending in an unanswered user turn.
+    history = (await agent.load_session("u1")).history
     assert all(c.role == "model" for c in history[-1:]) or history == []
 
 

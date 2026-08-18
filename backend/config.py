@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     notion_root_page_id: str = ""
     state_dir: Path = Path(".state")
 
+    # Upstash Redis. Set both to run on serverless (Vercel), where the
+    # filesystem is ephemeral and instances don't share memory. Left empty,
+    # storage falls back to a local file for development.
+    redis_url: str = ""
+    redis_token: str = ""
+
+    # How long a signed-in session's tokens survive without use. Notion's
+    # refresh tokens die after 30 idle days, so outliving that is pointless.
+    session_ttl_seconds: int = 60 * 60 * 24 * 30
+
+    # Conversation history is disposable; expire it so Redis doesn't grow
+    # without bound on the free tier.
+    chat_ttl_seconds: int = 60 * 60 * 12
+
     # Refresh the access token this many seconds before it actually expires,
     # so an in-flight request never races the expiry.
     refresh_skew_seconds: int = 300
@@ -45,16 +59,15 @@ class Settings(BaseSettings):
     max_agent_iterations: int = 10
 
     @property
-    def client_registration_path(self) -> Path:
-        return self.state_dir / "oauth_client.json"
-
-    @property
-    def token_store_path(self) -> Path:
-        return self.state_dir / "tokens.json"
+    def uses_redis(self) -> bool:
+        return bool(self.redis_url and self.redis_token)
 
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()  # type: ignore[call-arg]
-    settings.state_dir.mkdir(parents=True, exist_ok=True)
+    # Serverless filesystems are read-only outside /tmp, so only create the
+    # local state directory when we're actually using file storage.
+    if not settings.uses_redis:
+        settings.state_dir.mkdir(parents=True, exist_ok=True)
     return settings

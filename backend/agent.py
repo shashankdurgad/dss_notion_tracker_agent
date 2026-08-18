@@ -132,27 +132,86 @@ class PendingWrite:
 
 @dataclass
 class ChatSession:
-    """Per-user conversation state. In-memory; resets on server restart."""
+    """Per-user conversation state.
+
+    Persisted to shared storage between requests, so a conversation survives
+    across serverless instances. Keyed by user; never shared between users.
+    """
 
     history: list[types.Content] = field(default_factory=list)
     pending: dict[str, PendingWrite] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "history": [c.model_dump(mode="json", exclude_none=True) for c in self.history],
+            "pending": {
+                call_id: {
+                    "call_id": p.call_id,
+                    "tool_name": p.tool_name,
+                    "arguments": p.arguments,
+                    "history": [
+                        c.model_dump(mode="json", exclude_none=True) for c in p.history
+                    ],
+                    "completed_parts": [
+                        part.model_dump(mode="json", exclude_none=True)
+                        for part in p.completed_parts
+                    ],
+                }
+                for call_id, p in self.pending.items()
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ChatSession:
+        return cls(
+            history=[types.Content(**c) for c in data.get("history", [])],
+            pending={
+                call_id: PendingWrite(
+                    call_id=p["call_id"],
+                    tool_name=p["tool_name"],
+                    arguments=p["arguments"],
+                    history=[types.Content(**c) for c in p["history"]],
+                    completed_parts=[types.Part(**part) for part in p["completed_parts"]],
+                )
+                for call_id, p in (data.get("pending") or {}).items()
+            },
+        )
 
 
 AgentEvent = dict[str, Any]
 
 
 class NotionAgent:
-    def __init__(self, settings: Settings, mcp: NotionMCPManager) -> None:
+    def __init__(
+        self, settings: Settings, mcp: NotionMCPManager, storage: Any
+    ) -> None:
         self._settings = settings
         self._mcp = mcp
+        self._storage = storage
         self._client = genai.Client(api_key=settings.gemini_api_key)
-        self._sessions: dict[str, ChatSession] = {}
 
-    def session(self, user_id: str) -> ChatSession:
-        return self._sessions.setdefault(user_id, ChatSession())
+    @staticmethod
+    def _key(user_id: str) -> str:
+        return f"chat:{user_id}"
 
-    def reset(self, user_id: str) -> None:
-        self._sessions.pop(user_id, None)
+    async def load_session(self, user_id: str) -> ChatSession:
+        raw = await self._storage.get(self._key(user_id))
+        if isinstance(raw, dict):
+            try:
+                return ChatSession.from_dict(raw)
+            except Exception:  # noqa: BLE001 - shape drift shouldn't wedge chat
+                logger.warning("Discarding unreadable chat session", exc_info=True)
+        return ChatSession()
+
+    async def save_session(self, user_id: str, session: ChatSession) -> None:
+        await self._storage.set(
+            self._key(user_id),
+            session.to_dict(),
+            ttl_seconds=self._settings.chat_ttl_seconds,
+        )
+
+    async def reset(self, user_id: str) -> None:
+        await self._storage.delete(self._key(user_id))
 
     # ---------- tool plumbing ----------
 
@@ -179,12 +238,17 @@ class NotionAgent:
     # ---------- main loop ----------
 
     async def send(self, user_id: str, message: str) -> AsyncIterator[AgentEvent]:
-        session = self.session(user_id)
+        session = await self.load_session(user_id)
         session.history.append(
             types.Content(role="user", parts=[types.Part(text=message)])
         )
-        async for event in self._run(user_id, session):
-            yield event
+        try:
+            async for event in self._run(user_id, session):
+                yield event
+        finally:
+            # Persist even on error or client disconnect, so the rewound
+            # history and any parked approval survive to the next request.
+            await self.save_session(user_id, session)
 
     async def resume(
         self,
@@ -192,7 +256,7 @@ class NotionAgent:
         call_id: str,
         decision: Literal["approve", "reject"],
     ) -> AsyncIterator[AgentEvent]:
-        session = self.session(user_id)
+        session = await self.load_session(user_id)
         pending = session.pending.pop(call_id, None)
         if pending is None:
             yield {"type": "error", "message": "That approval request has expired."}
@@ -239,8 +303,11 @@ class NotionAgent:
             yield {"type": "tool_rejected", "tool": pending.tool_name}
 
         session.history.append(types.Content(role="user", parts=parts))
-        async for event in self._run(user_id, session):
-            yield event
+        try:
+            async for event in self._run(user_id, session):
+                yield event
+        finally:
+            await self.save_session(user_id, session)
 
     async def _generate(
         self, session: ChatSession, config: types.GenerateContentConfig

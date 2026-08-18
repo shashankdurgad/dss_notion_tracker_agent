@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import secrets
-import time
-from dataclasses import dataclass
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -14,30 +12,24 @@ from .agent import NotionAgent
 from .config import Settings, get_settings
 from .mcp_client import NotionMCPManager
 from .oauth import NotionOAuthClient
+from .storage import build_storage
 from .tokens import TokenStore
 
 SESSION_COOKIE = "dss_session"
 PKCE_TTL_SECONDS = 600  # authorization request must be completed within 10 min
 
 
-@dataclass
-class PendingAuth:
-    code_verifier: str
-    created_at: float
-
-
 class AppState:
     def __init__(self) -> None:
         self.settings: Settings = get_settings()
-        self.oauth = NotionOAuthClient(self.settings)
-        self.tokens = TokenStore(self.settings, self.oauth)
+        self.storage = build_storage(self.settings)
+        self.oauth = NotionOAuthClient(self.settings, self.storage)
+        self.tokens = TokenStore(self.settings, self.oauth, self.storage)
         self.mcp = NotionMCPManager(self.settings, self.tokens)
-        self.agent = NotionAgent(self.settings, self.mcp)
+        self.agent = NotionAgent(self.settings, self.mcp, self.storage)
         self.serializer = URLSafeSerializer(
             self.settings.session_secret, salt="dss-session"
         )
-        # state -> PKCE verifier, held server-side only.
-        self._pending_auth: dict[str, PendingAuth] = {}
 
     # ---------- session cookie ----------
 
@@ -56,24 +48,25 @@ class AppState:
         return uid if isinstance(uid, str) else None
 
     # ---------- PKCE state ----------
+    #
+    # Held in shared storage rather than memory: on serverless the /auth/login
+    # and /auth/callback requests routinely land on different instances, so an
+    # in-process dict would fail every sign-in. The TTL expires abandoned
+    # authorization attempts without a sweeper.
 
-    def stash_pkce(self, state: str, verifier: str) -> None:
-        self._expire_pkce()
-        self._pending_auth[state] = PendingAuth(
-            code_verifier=verifier, created_at=time.time()
+    async def stash_pkce(self, state: str, verifier: str) -> None:
+        await self.storage.set(
+            f"pkce:{state}", verifier, ttl_seconds=PKCE_TTL_SECONDS
         )
 
-    def take_pkce(self, state: str) -> str | None:
-        self._expire_pkce()
-        # Constant-time lookup isn't meaningful on a dict, but the state value
-        # itself is a 32-byte random token and is single-use.
-        entry = self._pending_auth.pop(state, None)
-        return entry.code_verifier if entry else None
-
-    def _expire_pkce(self) -> None:
-        cutoff = time.time() - PKCE_TTL_SECONDS
-        for key in [k for k, v in self._pending_auth.items() if v.created_at < cutoff]:
-            self._pending_auth.pop(key, None)
+    async def take_pkce(self, state: str) -> str | None:
+        """Consume a PKCE verifier. Single-use: a replayed state returns None."""
+        key = f"pkce:{state}"
+        verifier = await self.storage.get(key)
+        if verifier is None:
+            return None
+        await self.storage.delete(key)
+        return verifier if isinstance(verifier, str) else None
 
 
 def get_state(request: Request) -> AppState:

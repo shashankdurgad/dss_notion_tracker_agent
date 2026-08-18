@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 import time
 from dataclasses import dataclass
@@ -21,6 +20,10 @@ import httpx
 from .config import NOTION_MCP_BASE, USER_AGENT, Settings
 
 DISCOVERY_TIMEOUT = 15.0
+
+# Storage key for the dynamically registered OAuth client. Shared across all
+# instances so a cold start reuses the existing registration.
+CLIENT_REGISTRATION_KEY = "oauth:client"
 
 
 class OAuthError(Exception):
@@ -100,8 +103,9 @@ class TokenSet:
 class NotionOAuthClient:
     """Discovery + registration + token operations. Stateless per call."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, storage: Any = None) -> None:
         self._settings = settings
+        self._storage = storage
         self._metadata: ServerMetadata | None = None
         self._client_id: str | None = None
         self._client_secret: str | None = None
@@ -163,9 +167,10 @@ class NotionOAuthClient:
         if self._client_id:
             return self._client_id
 
-        path = self._settings.client_registration_path
-        if path.exists():
-            saved = json.loads(path.read_text())
+        # Shared across instances: on serverless, re-registering per cold start
+        # would leak a new client record on every scale-up.
+        saved = await self._storage.get(CLIENT_REGISTRATION_KEY) if self._storage else None
+        if isinstance(saved, dict):
             # Registration is bound to the redirect URI; if that changed, redo it.
             if saved.get("redirect_uri") == self._settings.oauth_redirect_uri:
                 self._client_id = saved["client_id"]
@@ -200,18 +205,15 @@ class NotionOAuthClient:
         self._client_id = data["client_id"]
         self._client_secret = data.get("client_secret")
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
+        if self._storage:
+            await self._storage.set(
+                CLIENT_REGISTRATION_KEY,
                 {
                     "client_id": self._client_id,
                     "client_secret": self._client_secret,
                     "redirect_uri": self._settings.oauth_redirect_uri,
                 },
-                indent=2,
             )
-        )
-        path.chmod(0o600)
         return self._client_id
 
     # ---------- authorization ----------

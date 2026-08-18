@@ -54,6 +54,22 @@ class FakeModels:
         )()
 
 
+class MemoryStorage:
+    """In-process Storage implementation for tests."""
+
+    def __init__(self) -> None:
+        self.data: dict[str, object] = {}
+
+    async def get(self, key: str):
+        return self.data.get(key)
+
+    async def set(self, key: str, value, ttl_seconds: int | None = None) -> None:
+        self.data[key] = value
+
+    async def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+
 def _agent(monkeypatch, turns: list[types.Content]) -> tuple[NotionAgent, FakeMCP]:
     from backend.config import Settings
 
@@ -66,7 +82,7 @@ def _agent(monkeypatch, turns: list[types.Content]) -> tuple[NotionAgent, FakeMC
     monkeypatch.setattr(
         "backend.agent.genai.Client", lambda **_: type("C", (), {"aio": None})()
     )
-    agent = NotionAgent(settings, mcp)  # type: ignore[arg-type]
+    agent = NotionAgent(settings, mcp, MemoryStorage())  # type: ignore[arg-type]
     agent._client = type("C", (), {"aio": type("A", (), {"models": FakeModels(turns)})()})()  # type: ignore[attr-defined]
     return agent, mcp
 

@@ -22,7 +22,7 @@ async def login(state: AppState = Depends(get_state)) -> RedirectResponse:
     try:
         verifier, challenge = generate_pkce_pair()
         oauth_state = secrets.token_urlsafe(32)
-        state.stash_pkce(oauth_state, verifier)
+        await state.stash_pkce(oauth_state, verifier)
         url = await state.oauth.authorization_url(
             state=oauth_state, code_challenge=challenge
         )
@@ -50,7 +50,7 @@ async def callback(
         return RedirectResponse(f"{frontend}?auth_error=missing_params", status_code=307)
 
     # Single-use lookup; an unknown/replayed state is rejected outright (CSRF).
-    verifier = state.take_pkce(returned_state)
+    verifier = await state.take_pkce(returned_state)
     if verifier is None:
         return RedirectResponse(f"{frontend}?auth_error=bad_state", status_code=307)
 
@@ -97,7 +97,7 @@ async def status(
     if not user_id:
         return JSONResponse({"authenticated": False})
 
-    tokens = state.tokens.peek(user_id)
+    tokens = await state.tokens.peek(user_id)
     if tokens is None:
         return JSONResponse({"authenticated": False})
 
@@ -117,7 +117,7 @@ async def logout(
     if user_id:
         await state.mcp.disconnect(user_id)
         await state.tokens.clear(user_id)
-        state.agent.reset(user_id)
+        await state.agent.reset(user_id)
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response
