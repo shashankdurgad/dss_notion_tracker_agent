@@ -91,6 +91,79 @@ boot, and caches the resulting `client_id` in `.state/`.
 
 ---
 
+## Deploying to Vercel
+
+Free on Vercel Hobby + Upstash Redis free tier.
+
+### Why Redis is needed
+
+Vercel runs the backend as **stateless functions**: the filesystem is wiped
+between requests, and two requests from the same person can land on different
+instances. Four things must therefore live outside the process — Notion tokens,
+the registered OAuth client, PKCE state (login starts on one instance and the
+callback lands on another), and chat history.
+
+"Shared" means shared **between server instances, never between users**. Every
+record is keyed by user (`session:<id>`, `chat:<id>`), and a user's signed
+cookie can only address their own keys. Notion tokens are encrypted with
+`TOKEN_ENC_KEY` before they're written, so the Redis host can't read them —
+and Notion's own permissions still apply underneath.
+
+Leave `REDIS_URL`/`REDIS_TOKEN` blank locally and it uses a file instead. Same
+code either way.
+
+### 1. Create a Redis database
+
+At [console.upstash.com](https://console.upstash.com), create a Redis database
+and copy the **REST URL** and **REST token** (not the `redis://` connection
+string — the REST API is used because serverless can't hold a connection pool
+open).
+
+### 2. Deploy
+
+```bash
+npm i -g vercel
+vercel            # first deploy, note the URL it gives you
+```
+
+### 3. Set environment variables
+
+In the Vercel dashboard → Settings → Environment Variables:
+
+| Variable | Value |
+|---|---|
+| `GEMINI_API_KEY` | your Gemini key |
+| `SESSION_SECRET` | `python -c "import secrets; print(secrets.token_urlsafe(32))"` |
+| `TOKEN_ENC_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `REDIS_URL` | Upstash REST URL |
+| `REDIS_TOKEN` | Upstash REST token |
+| `OAUTH_REDIRECT_URI` | `https://<your-app>.vercel.app/auth/callback` |
+| `FRONTEND_URL` | `https://<your-app>.vercel.app` |
+
+Generate **fresh** secrets for production — don't reuse your local ones.
+
+### 4. Redeploy
+
+```bash
+vercel --prod
+```
+
+Environment variables are only picked up on a new build, so this step is
+required after step 3.
+
+> **The redirect URI must match exactly**, including `https://` and no trailing
+> slash. A mismatch is the most common cause of a failed sign-in, and it
+> surfaces as `auth_error=exchange_failed`. Changing `OAUTH_REDIRECT_URI` later
+> re-registers the OAuth client automatically.
+
+### Preview deployments
+
+Each Vercel preview gets its own URL, which won't match `OAUTH_REDIRECT_URI`,
+so **sign-in only works on the production domain** unless you set the variables
+per-environment. That's usually what you want.
+
+---
+
 ## Things worth knowing
 
 **`notion-search` requires Notion AI.** If the DSS workspace isn't on a plan
@@ -102,10 +175,15 @@ so the agent can navigate from a known root page instead.
 built dynamically from `list_tools()` at runtime, so a renamed tool won't break
 the app — but the friendly labels in the UI may fall back to raw tool names.
 
-**Sessions are in-memory.** Conversation history resets when the backend
-restarts. Notion tokens survive (they're persisted encrypted under `.state/`),
-so you won't have to sign in again. Swap in Redis or SQLite if that becomes
-annoying.
+**Chat history expires after 12 hours**, and sign-ins after 30 days of
+inactivity (matching Notion's own refresh-token expiry). Both are TTLs on the
+storage records, so nothing accumulates on the Redis free tier.
+
+**Refresh races across instances.** The per-user refresh mutex only serializes
+within one process, so on serverless two instances could in principle refresh
+at once. The window is tiny — a refresh happens once per ~8 hours, 5 minutes
+before expiry — and the loser simply re-reads the winner's token, so it
+self-heals. Worth knowing if you ever see an unexpected re-login.
 
 **Token lifecycle.** Access tokens last ~8 hours and refresh automatically 5
 minutes before expiry. Refresh tokens rotate on every use, and refreshes are
@@ -125,8 +203,9 @@ you're prompted to sign in again; it is never retried.
 | `TOKEN_ENC_KEY` | — | **Required.** Fernet key encrypting Notion tokens |
 | `OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/callback` | Must match exactly |
 | `FRONTEND_URL` | `http://localhost:5173` | CORS origin + post-auth redirect |
+| `REDIS_URL` / `REDIS_TOKEN` | — | Upstash REST credentials. Set both for serverless; blank uses a local file |
 | `NOTION_ROOT_PAGE_ID` | — | Fallback root page when search is unavailable |
-| `STATE_DIR` | `.state` | Encrypted tokens + registered OAuth client |
+| `STATE_DIR` | `.state` | Local-only state directory when Redis isn't configured |
 
 ---
 
@@ -154,9 +233,12 @@ Then in the app:
 ## Project layout
 
 ```
+app.py            Vercel entrypoint (re-exports backend.main:app)
+vercel.json       routing + function config
 backend/
   main.py         app entrypoint, CORS, lifespan
   config.py       env settings
+  storage.py      Redis / local-file key-value backends
   oauth.py        discovery, DCR, PKCE, token exchange/refresh
   tokens.py       encrypted store + per-user refresh mutex
   mcp_client.py   Notion MCP session manager
