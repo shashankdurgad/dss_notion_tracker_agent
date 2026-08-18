@@ -10,6 +10,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from .agent import NotionAgent
 from .config import Settings, get_settings
+from .llm import build_provider
 from .mcp_client import NotionMCPManager
 from .oauth import NotionOAuthClient
 from .storage import build_storage
@@ -26,7 +27,10 @@ class AppState:
         self.oauth = NotionOAuthClient(self.settings, self.storage)
         self.tokens = TokenStore(self.settings, self.oauth, self.storage)
         self.mcp = NotionMCPManager(self.settings, self.tokens)
-        self.agent = NotionAgent(self.settings, self.mcp, self.storage)
+        self.provider = build_provider(self.settings)
+        self.agent = NotionAgent(
+            self.settings, self.mcp, self.storage, self.provider
+        )
         self.serializer = URLSafeSerializer(
             self.settings.session_secret, salt="dss-session"
         )

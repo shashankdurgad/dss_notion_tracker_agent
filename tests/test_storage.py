@@ -1,90 +1,64 @@
-"""State must survive across instances, and stay isolated between users.
-
-These are the properties the Vercel/serverless refactor exists to guarantee.
-"""
+"""State must survive across instances, and stay isolated between users."""
 
 from __future__ import annotations
 
 import pytest
-from google.genai import types
 
-from backend.agent import NotionAgent
 from backend.storage import FileStorage
-from tests.test_approval_gate import FakeMCP, MemoryStorage, _call, _text
-
-
-def _make_agent(monkeypatch, storage, turns):
-    from backend.config import Settings
-
-    settings = Settings(
-        gemini_api_key="test", session_secret="s" * 32, token_enc_key="k" * 32
-    )
-    monkeypatch.setattr(
-        "backend.agent.genai.Client", lambda **_: type("C", (), {"aio": None})()
-    )
-    agent = NotionAgent(settings, FakeMCP(), storage)  # type: ignore[arg-type]
-
-    class Models:
-        def __init__(self) -> None:
-            self.i = 0
-
-        async def generate_content(self, **kwargs):
-            content = turns[min(self.i, len(turns) - 1)]
-            self.i += 1
-            return type(
-                "R", (), {"candidates": [type("C", (), {"content": content})()]}
-            )()
-
-    agent._client = type("C", (), {"aio": type("A", (), {"models": Models()})()})()
-    return agent
+from tests.conftest import (
+    MemoryStorage,
+    ScriptedProvider,
+    call_response,
+    make_agent,
+    text_response,
+)
 
 
 @pytest.mark.asyncio
-async def test_history_survives_instance_swap(monkeypatch):
+async def test_history_survives_instance_swap():
     """A second 'instance' sharing storage sees the first one's conversation."""
     storage = MemoryStorage()
 
-    first = _make_agent(monkeypatch, storage, [_text("Hello there.")])
+    first, _ = make_agent(ScriptedProvider([text_response("Hello there.")]), storage)
     [e async for e in first.send("alice", "hi")]
 
     # Simulate a cold start: brand new agent object, same shared storage.
-    second = _make_agent(monkeypatch, storage, [_text("Still here.")])
+    second, _ = make_agent(ScriptedProvider([text_response("Still here.")]), storage)
     session = await second.load_session("alice")
 
-    assert len(session.history) == 2  # user turn + model reply
-    assert session.history[0].parts[0].text == "hi"
+    assert len(session.history) == 2  # user turn + assistant reply
+    assert session.history[0].text == "hi"
 
 
 @pytest.mark.asyncio
-async def test_users_cannot_see_each_others_chats(monkeypatch):
+async def test_users_cannot_see_each_others_chats():
     """The isolation guarantee: each user's history is keyed separately."""
     storage = MemoryStorage()
-    agent = _make_agent(monkeypatch, storage, [_text("ok")])
+    agent, _ = make_agent(ScriptedProvider([text_response("ok")]), storage)
 
     [e async for e in agent.send("alice", "alice-secret")]
     [e async for e in agent.send("bob", "bob-secret")]
 
-    alice = await agent.load_session("alice")
-    bob = await agent.load_session("bob")
+    alice = str((await agent.load_session("alice")).to_dict())
+    bob = str((await agent.load_session("bob")).to_dict())
 
-    alice_text = str(alice.to_dict())
-    bob_text = str(bob.to_dict())
-    assert "alice-secret" in alice_text and "bob-secret" not in alice_text
-    assert "bob-secret" in bob_text and "alice-secret" not in bob_text
+    assert "alice-secret" in alice and "bob-secret" not in alice
+    assert "bob-secret" in bob and "alice-secret" not in bob
 
 
 @pytest.mark.asyncio
-async def test_pending_approval_survives_instance_swap(monkeypatch):
+async def test_pending_approval_survives_instance_swap():
     """A parked write must be resumable from a different instance."""
     storage = MemoryStorage()
 
-    first = _make_agent(
-        monkeypatch, storage, [_call("notion-update-page", {"page_id": "p1"})]
+    first, _ = make_agent(
+        ScriptedProvider([call_response("notion-update-page", {"page_id": "p1"})]),
+        storage,
     )
     events = [e async for e in first.send("alice", "edit it")]
     call_id = next(e["call_id"] for e in events if e["type"] == "approval_required")
 
-    second = _make_agent(monkeypatch, storage, [_text("Done.")])
+    second, _ = make_agent(ScriptedProvider([text_response("Done.")]), storage)
     session = await second.load_session("alice")
 
     assert call_id in session.pending

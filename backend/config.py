@@ -25,8 +25,16 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
-    gemini_api_key: str
+    # "gemini" or "openrouter". OpenRouter's free tier is a useful escape
+    # hatch when Gemini rate-limits, at the cost of model quality.
+    llm_provider: str = "gemini"
+
+    # Optional so the app can run on either provider alone.
+    gemini_api_key: str = ""
     gemini_model: str = "gemini-3.7-flash"
+
+    openrouter_api_key: str = ""
+    openrouter_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
 
     session_secret: str
     token_enc_key: str
@@ -62,10 +70,23 @@ class Settings(BaseSettings):
     def uses_redis(self) -> bool:
         return bool(self.redis_url and self.redis_token)
 
+    def validate_provider(self) -> None:
+        """Fail at startup rather than on the first user message."""
+        if self.llm_provider not in ("gemini", "openrouter"):
+            raise ValueError(
+                f"LLM_PROVIDER must be 'gemini' or 'openrouter', "
+                f"got {self.llm_provider!r}"
+            )
+        if self.llm_provider == "gemini" and not self.gemini_api_key:
+            raise ValueError("LLM_PROVIDER=gemini requires GEMINI_API_KEY")
+        if self.llm_provider == "openrouter" and not self.openrouter_api_key:
+            raise ValueError("LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY")
+
 
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()  # type: ignore[call-arg]
+    settings.validate_provider()
     # Serverless filesystems are read-only outside /tmp, so only create the
     # local state directory when we're actually using file storage.
     if not settings.uses_redis:

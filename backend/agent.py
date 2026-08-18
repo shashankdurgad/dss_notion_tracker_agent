@@ -1,11 +1,12 @@
-"""Gemini agent loop over Notion MCP tools, with a write-approval gate.
+"""Agent loop over Notion MCP tools, with a write-approval gate.
 
-Automatic function calling is deliberately DISABLED. If the SDK executed tools
-for us, a page-write would land before we could ask the user. Instead we run
-the loop by hand: reads execute immediately, writes suspend the turn and wait
-for an explicit approval from the UI.
+Tools are never executed automatically by the model SDK. If they were, a
+page-write would land before we could ask the user. The loop is driven by
+hand: reads execute immediately, writes suspend the turn and wait for an
+explicit approval from the UI.
 
-Verified against google-genai==2.18.1 and mcp==2.0.0.
+The loop is provider-agnostic (see llm.py) so it runs on Gemini or on any
+OpenAI-compatible endpoint such as OpenRouter.
 """
 
 from __future__ import annotations
@@ -18,18 +19,15 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Literal
 
-from google import genai
-from google.genai import types
 from mcp.types import Tool as MCPTool
 
 from .config import Settings
+from .llm import LLMProvider, Message, ToolCall, ToolSpec
 from .mcp_client import NotionMCPManager
 
 logger = logging.getLogger(__name__)
 
 # Tools that mutate the workspace. Everything else is treated as read-only.
-# Kept as an explicit allowlist of *writes* so a newly-introduced Notion tool
-# defaults to requiring approval only if we add it here — see _is_write().
 WRITE_TOOLS = {
     "notion-create-pages",
     "notion-update-page",
@@ -71,9 +69,8 @@ def _is_write(tool_name: str) -> bool:
     return any(hint in lowered for hint in WRITE_HINTS)
 
 
-# Gemini capacity errors. 503 = model saturated, 429 = rate limited,
-# 500/504 = transient server-side. All are worth retrying; 400-class errors
-# (bad request, bad key, quota exhausted) are not.
+# Transient capacity errors. 503 = saturated, 429 = rate limited,
+# 500/502/504 = transient server-side. Client errors are not retried.
 _RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
 _MAX_MODEL_ATTEMPTS = 4
 _BASE_BACKOFF_SECONDS = 1.0
@@ -96,24 +93,26 @@ def _is_retryable(exc: Exception) -> bool:
             "overloaded",
             "try again later",
             "deadline exceeded",
+            "rate limit",
         )
     )
 
 
 def _friendly_model_error(exc: Exception) -> str:
     text = str(exc)
-    if "503" in text or "UNAVAILABLE" in text:
+    lowered = text.lower()
+    if "503" in text or "unavailable" in lowered or "high demand" in lowered:
         return (
-            "Gemini is at capacity right now, and it stayed busy across several "
+            "The model is at capacity right now, and stayed busy across several "
             "retries. Your message wasn't lost — send it again in a moment."
         )
-    if "429" in text or "RESOURCE_EXHAUSTED" in text:
+    if "429" in text or "resource_exhausted" in lowered or "rate limit" in lowered:
         return (
-            "Hit the Gemini rate limit. Wait a few seconds and try again; if it "
-            "keeps happening, check your API quota."
+            "Hit the model's rate limit. Wait a few seconds and try again; if it "
+            "keeps happening you may be out of daily quota."
         )
-    if "API key" in text or "401" in text or "403" in text:
-        return "Gemini rejected the API key. Check GEMINI_API_KEY in .env."
+    if "api key" in lowered or "401" in text or "403" in text:
+        return "The model provider rejected the API key. Check your configuration."
     return f"The model call failed: {exc}"
 
 
@@ -124,38 +123,32 @@ class PendingWrite:
     call_id: str
     tool_name: str
     arguments: dict[str, Any]
-    # Full conversation up to and including the model turn that asked for this.
-    history: list[types.Content]
-    # Other calls in the same model turn that already ran (reads).
-    completed_parts: list[types.Part] = field(default_factory=list)
+    # Conversation up to and including the model turn that asked for this.
+    history: list[Message]
+    # Results of other calls in the same turn that already ran (reads).
+    completed: list[Message] = field(default_factory=list)
+    # The provider-assigned id, needed to match the result back to the call.
+    provider_call_id: str = ""
 
 
 @dataclass
 class ChatSession:
-    """Per-user conversation state.
+    """Per-user conversation state, persisted between requests."""
 
-    Persisted to shared storage between requests, so a conversation survives
-    across serverless instances. Keyed by user; never shared between users.
-    """
-
-    history: list[types.Content] = field(default_factory=list)
+    history: list[Message] = field(default_factory=list)
     pending: dict[str, PendingWrite] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "history": [c.model_dump(mode="json", exclude_none=True) for c in self.history],
+            "history": [m.to_dict() for m in self.history],
             "pending": {
                 call_id: {
                     "call_id": p.call_id,
                     "tool_name": p.tool_name,
                     "arguments": p.arguments,
-                    "history": [
-                        c.model_dump(mode="json", exclude_none=True) for c in p.history
-                    ],
-                    "completed_parts": [
-                        part.model_dump(mode="json", exclude_none=True)
-                        for part in p.completed_parts
-                    ],
+                    "provider_call_id": p.provider_call_id,
+                    "history": [m.to_dict() for m in p.history],
+                    "completed": [m.to_dict() for m in p.completed],
                 }
                 for call_id, p in self.pending.items()
             },
@@ -164,14 +157,15 @@ class ChatSession:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ChatSession:
         return cls(
-            history=[types.Content(**c) for c in data.get("history", [])],
+            history=[Message.from_dict(m) for m in data.get("history", [])],
             pending={
                 call_id: PendingWrite(
                     call_id=p["call_id"],
                     tool_name=p["tool_name"],
                     arguments=p["arguments"],
-                    history=[types.Content(**c) for c in p["history"]],
-                    completed_parts=[types.Part(**part) for part in p["completed_parts"]],
+                    provider_call_id=p.get("provider_call_id", ""),
+                    history=[Message.from_dict(m) for m in p["history"]],
+                    completed=[Message.from_dict(m) for m in p.get("completed", [])],
                 )
                 for call_id, p in (data.get("pending") or {}).items()
             },
@@ -183,12 +177,16 @@ AgentEvent = dict[str, Any]
 
 class NotionAgent:
     def __init__(
-        self, settings: Settings, mcp: NotionMCPManager, storage: Any
+        self,
+        settings: Settings,
+        mcp: NotionMCPManager,
+        storage: Any,
+        provider: LLMProvider,
     ) -> None:
         self._settings = settings
         self._mcp = mcp
         self._storage = storage
-        self._client = genai.Client(api_key=settings.gemini_api_key)
+        self._provider = provider
 
     @staticmethod
     def _key(user_id: str) -> str:
@@ -215,33 +213,37 @@ class NotionAgent:
 
     # ---------- tool plumbing ----------
 
-    async def _tool_config(self, user_id: str) -> list[types.Tool]:
-        mcp_tools = await self._mcp.list_tools(user_id)
-        declarations = [self._declare(tool) for tool in mcp_tools]
-        return [types.Tool(function_declarations=declarations)]
+    async def _tools(self, user_id: str) -> list[ToolSpec]:
+        return [self._spec(t) for t in await self._mcp.list_tools(user_id)]
 
     @staticmethod
-    def _declare(tool: MCPTool) -> types.FunctionDeclaration:
-        # Pass the MCP JSON Schema through verbatim. parameters_json_schema
-        # accepts raw JSON Schema, so there's no lossy hand-conversion and the
+    def _spec(tool: MCPTool) -> ToolSpec:
+        # MCP schemas are JSON Schema already; pass through verbatim so the
         # declarations stay correct as Notion's Beta tool shapes change.
-        return types.FunctionDeclaration(
+        return ToolSpec(
             name=tool.name,
             description=tool.description or "",
-            parameters_json_schema=tool.input_schema or {"type": "object"},
+            parameters=tool.input_schema or {"type": "object"},
         )
 
     async def _execute(self, user_id: str, name: str, args: dict[str, Any]) -> str:
         result = await self._mcp.call_tool(user_id, name, args)
         return _result_to_text(result)
 
+    @staticmethod
+    def _tool_result(call: ToolCall, output: str) -> Message:
+        return Message(
+            role="tool",
+            text=output,
+            tool_call_id=call.id,
+            tool_name=call.name,
+        )
+
     # ---------- main loop ----------
 
     async def send(self, user_id: str, message: str) -> AsyncIterator[AgentEvent]:
         session = await self.load_session(user_id)
-        session.history.append(
-            types.Content(role="user", parts=[types.Part(text=message)])
-        )
+        session.history.append(Message(role="user", text=message))
         try:
             async for event in self._run(user_id, session):
                 yield event
@@ -263,7 +265,12 @@ class NotionAgent:
             return
 
         session.history = pending.history
-        parts = list(pending.completed_parts)
+        results = list(pending.completed)
+        call = ToolCall(
+            id=pending.provider_call_id,
+            name=pending.tool_name,
+            arguments=pending.arguments,
+        )
 
         if decision == "approve":
             yield {
@@ -279,58 +286,45 @@ class NotionAgent:
                 output = f"Tool failed: {exc}"
                 logger.exception("Approved write failed")
             yield {"type": "tool_result", "tool": pending.tool_name, "result": output}
-            parts.append(
-                types.Part(
-                    function_response=types.FunctionResponse(
-                        name=pending.tool_name, response={"result": output}
-                    )
-                )
-            )
+            results.append(self._tool_result(call, output))
         else:
-            # Tell the model it was declined so it can respond gracefully
-            # instead of silently assuming the write succeeded.
-            parts.append(
-                types.Part(
-                    function_response=types.FunctionResponse(
-                        name=pending.tool_name,
-                        response={
-                            "result": "The user declined this change. "
-                            "It was NOT applied to Notion."
-                        },
-                    )
+            # Tell the model it was declined so it responds gracefully instead
+            # of assuming the write succeeded.
+            results.append(
+                self._tool_result(
+                    call,
+                    "The user declined this change. It was NOT applied to Notion.",
                 )
             )
             yield {"type": "tool_rejected", "tool": pending.tool_name}
 
-        session.history.append(types.Content(role="user", parts=parts))
+        session.history.extend(results)
         try:
             async for event in self._run(user_id, session):
                 yield event
         finally:
             await self.save_session(user_id, session)
 
-    async def _generate(
-        self, session: ChatSession, config: types.GenerateContentConfig
-    ):
-        """Call Gemini, retrying transient capacity errors with backoff."""
+    async def _generate(self, session: ChatSession, tools: list[ToolSpec]):
+        """Call the model, retrying transient capacity errors with backoff."""
         last: Exception | None = None
         for attempt in range(_MAX_MODEL_ATTEMPTS):
             try:
-                return await self._client.aio.models.generate_content(
-                    model=self._settings.gemini_model,
-                    contents=session.history,
-                    config=config,
+                return await self._provider.generate(
+                    system=SYSTEM_INSTRUCTION,
+                    messages=session.history,
+                    tools=tools,
                 )
             except Exception as exc:  # noqa: BLE001 - classified below
                 last = exc
                 if not _is_retryable(exc) or attempt == _MAX_MODEL_ATTEMPTS - 1:
                     raise
                 # Exponential backoff with jitter: ~1s, 2s, 4s. Jitter stops
-                # several users' retries from landing in lockstep.
+                # several users' retries landing in lockstep.
                 delay = _BASE_BACKOFF_SECONDS * (2**attempt)
                 delay *= 0.5 + random.random()
                 logger.info(
-                    "Gemini unavailable (attempt %d/%d), retrying in %.1fs",
+                    "Model unavailable (attempt %d/%d), retrying in %.1fs",
                     attempt + 1,
                     _MAX_MODEL_ATTEMPTS,
                     delay,
@@ -342,65 +336,47 @@ class NotionAgent:
     def _rewind(session: ChatSession) -> None:
         """Drop trailing turns the model never answered.
 
-        Leaving a user turn with no model reply corrupts the next request, so
-        after a failure we trim back to the last model turn.
+        Leaving a user turn with no assistant reply corrupts the next request,
+        so after a failure we trim back to the last assistant turn.
         """
-        while session.history and session.history[-1].role != "model":
+        while session.history and session.history[-1].role != "assistant":
             session.history.pop()
 
     async def _run(
         self, user_id: str, session: ChatSession
     ) -> AsyncIterator[AgentEvent]:
-        tools = await self._tool_config(user_id)
-        config = types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            tools=tools,
-            # The whole approval design depends on this being disabled.
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                disable=True
-            ),
-        )
+        tools = await self._tools(user_id)
 
         for _ in range(self._settings.max_agent_iterations):
             try:
-                response = await self._generate(session, config)
+                response = await self._generate(session, tools)
             except Exception as exc:  # noqa: BLE001 - reported to the user
-                logger.warning("Gemini call failed: %s", exc)
-                # Roll back to the last turn that completed cleanly, so a failed
-                # attempt doesn't leave a dangling user turn with no reply. The
-                # user can retry against intact history.
+                logger.warning("Model call failed: %s", exc)
                 self._rewind(session)
                 yield {"type": "error", "message": _friendly_model_error(exc)}
                 return
 
-            candidate = (response.candidates or [None])[0]
-            if candidate is None or candidate.content is None:
+            if not response.text and not response.tool_calls:
                 self._rewind(session)
                 yield {
                     "type": "error",
-                    "message": "Gemini returned an empty response. Try again.",
+                    "message": "The model returned an empty response. Try again.",
                 }
                 return
 
-            model_content = candidate.content
-            session.history.append(model_content)
+            session.history.append(response.as_message())
 
-            calls = [p.function_call for p in (model_content.parts or []) if p.function_call]
+            if response.text:
+                yield {"type": "message", "text": response.text}
 
-            text = "".join(
-                p.text for p in (model_content.parts or []) if p.text
-            ).strip()
-            if text:
-                yield {"type": "message", "text": text}
-
-            if not calls:
+            if not response.tool_calls:
                 yield {"type": "done"}
                 return
 
-            reads = [c for c in calls if not _is_write(c.name or "")]
-            writes = [c for c in calls if _is_write(c.name or "")]
+            reads = [c for c in response.tool_calls if not _is_write(c.name)]
+            writes = [c for c in response.tool_calls if _is_write(c.name)]
 
-            parts: list[types.Part] = []
+            results: list[Message] = []
 
             # Reads run concurrently — they're safe and often several per turn.
             if reads:
@@ -408,16 +384,13 @@ class NotionAgent:
                     yield {
                         "type": "tool_start",
                         "tool": call.name,
-                        "arguments": dict(call.args or {}),
+                        "arguments": call.arguments,
                     }
-                results = await asyncio.gather(
-                    *(
-                        self._execute(user_id, c.name or "", dict(c.args or {}))
-                        for c in reads
-                    ),
+                outcomes = await asyncio.gather(
+                    *(self._execute(user_id, c.name, c.arguments) for c in reads),
                     return_exceptions=True,
                 )
-                for call, outcome in zip(reads, results):
+                for call, outcome in zip(reads, outcomes):
                     output = (
                         f"Tool failed: {outcome}"
                         if isinstance(outcome, BaseException)
@@ -428,36 +401,31 @@ class NotionAgent:
                         "tool": call.name,
                         "result": output,
                     }
-                    parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=call.name or "", response={"result": output}
-                            )
-                        )
-                    )
+                    results.append(self._tool_result(call, output))
 
             if writes:
-                # Park the first write and hand control to the user. Any further
-                # writes in this turn are dropped; the model re-proposes them on
-                # the next turn with the approved state in hand.
+                # Park the first write and hand control to the user. Further
+                # writes this turn are dropped; the model re-proposes them next
+                # turn with the approved state in hand.
                 call = writes[0]
                 call_id = uuid.uuid4().hex
                 session.pending[call_id] = PendingWrite(
                     call_id=call_id,
-                    tool_name=call.name or "",
-                    arguments=dict(call.args or {}),
+                    tool_name=call.name,
+                    arguments=call.arguments,
+                    provider_call_id=call.id,
                     history=list(session.history),
-                    completed_parts=parts,
+                    completed=results,
                 )
                 yield {
                     "type": "approval_required",
                     "call_id": call_id,
                     "tool": call.name,
-                    "arguments": dict(call.args or {}),
+                    "arguments": call.arguments,
                 }
                 return
 
-            session.history.append(types.Content(role="user", parts=parts))
+            session.history.extend(results)
 
         yield {
             "type": "error",
@@ -467,10 +435,7 @@ class NotionAgent:
 
 def _result_to_text(result: Any) -> str:
     """Flatten an MCP CallToolResult into text for the model."""
-    if getattr(result, "is_error", False):
-        prefix = "ERROR: "
-    else:
-        prefix = ""
+    prefix = "ERROR: " if getattr(result, "is_error", False) else ""
 
     structured = getattr(result, "structured_content", None)
     if structured:
