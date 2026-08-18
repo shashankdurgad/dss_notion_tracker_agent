@@ -1,11 +1,4 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd frontend && npm install && npm run build",
-  "functions": {
-    "app.py": {
-      "memory": 1024,
-      "maxDuration": 300,
-      "excludeFiles": "{tests/**,frontend/node_modules/**,frontend/src/**,frontend/public/**,.venv/**,.state/**,**/__pycache__/**,**/*.pyc}"
-    }
-  }
+  "buildCommand": "cd frontend && npm install && npm run build"
 }

@@ -1,0 +1,26 @@
+# Keep the function bundle small. Python has no tree-shaking on Vercel, so
+# everything reachable at build time is included unless excluded here.
+#
+# NOTE: frontend/dist is deliberately NOT excluded -- FastAPI mounts it to
+# serve the SPA, and Vercel promotes those files to the CDN at build time.
+
+tests/
+.venv/
+.state/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# Frontend sources; only the built output is needed at runtime.
+frontend/node_modules/
+frontend/src/
+frontend/index.html
+frontend/package-lock.json
+frontend/tsconfig.json
+frontend/vite.config.ts
+*.tsbuildinfo
+
+.git/
+.env
+README.md
