@@ -1,0 +1,41 @@
+export type AgentEvent =
+  | { type: "message"; text: string }
+  | { type: "tool_start"; tool: string; arguments: Record<string, unknown> }
+  | { type: "tool_result"; tool: string; result: string }
+  | { type: "tool_rejected"; tool: string }
+  | {
+      type: "approval_required";
+      call_id: string;
+      tool: string;
+      arguments: Record<string, unknown>;
+    }
+  | { type: "done" }
+  | { type: "error"; message: string }
+  | { type: "auth_required"; message: string };
+
+export interface ToolActivity {
+  tool: string;
+  arguments?: Record<string, unknown>;
+  result?: string;
+  status: "running" | "done" | "rejected";
+}
+
+export interface PendingApproval {
+  callId: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  text: string;
+  tools: ToolActivity[];
+  approval?: PendingApproval;
+  error?: string;
+}
+
+export interface AuthStatus {
+  authenticated: boolean;
+  workspace_name?: string | null;
+}
