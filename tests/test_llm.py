@@ -151,6 +151,15 @@ def test_build_provider_selects_backend():
     assert build_provider(settings).name == "openrouter"
 
 
+def test_openrouter_default_model_is_the_verified_one():
+    """Pin the default. Free models vary wildly at tool calling, and this one
+    is the only one verified end-to-end against the real system prompt."""
+    assert (
+        make_settings().openrouter_model
+        == "nvidia/nemotron-3-super-120b-a12b:free"
+    )
+
+
 def test_provider_validation_rejects_missing_key():
     settings = make_settings()
     settings.llm_provider = "openrouter"

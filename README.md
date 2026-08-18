@@ -178,18 +178,23 @@ OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 Nothing else changes — the agent loop is provider-agnostic, and stored chat
 history is provider-neutral, so switching mid-conversation is safe.
 
-**The model must support tool calling**, or the agent can't read Notion at
-all. Free models tested against this app's real system prompt on 2026-08-18:
+**Stick to `nvidia/nemotron-3-super-120b-a12b:free`.** It's the default, and
+the model this app is tuned against. Free models vary wildly at tool calling,
+and the agent is nothing but tool calls — a model that can't call tools can't
+read Notion at all.
+
+Tested against this app's real system prompt on 2026-08-18:
 
 | Model | Result |
 |---|---|
-| `nvidia/nemotron-3-super-120b-a12b:free` | ✅ tools, facts and URLs correct |
-| `nvidia/nemotron-3.5-lightning:free` | ✅ tools, facts and URLs correct |
+| **`nvidia/nemotron-3-super-120b-a12b:free`** | ✅ **default** — tools, facts and URLs correct |
+| `nvidia/nemotron-3.5-lightning:free` | ✅ also works, if the default is delisted |
 | `cohere/north-mini-code:free` | ⚠️ calls tools but ignored the tool result |
 | `google/gemma-4-31b-it:free` | ❌ 429 from the upstream provider |
 | `google/gemma-4-26b-a4b-it:free` | ❌ 429 from the upstream provider |
 
-To re-check what's free and tool-capable (the list changes often):
+Only change `OPENROUTER_MODEL` if the default gets delisted — OpenRouter's
+free list turns over regularly. To find current tool-capable free models:
 
 ```bash
 curl -s https://openrouter.ai/api/v1/models | python3 -c \
