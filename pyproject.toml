@@ -2,7 +2,9 @@
 name = "dss-notion-tracker-agent"
 version = "0.1.0"
 description = "Chatbot agent over UCL Data Science Society's Notion workspace, via Notion MCP + Gemini"
-requires-python = ">=3.11"
+# Vercel's Python runtime offers 3.12 / 3.13 / 3.14; pin the floor to a
+# version it actually provides so the build doesn't fall back unexpectedly.
+requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -27,13 +29,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 # --- Vercel ---
-# Vercel detects FastAPI from the dependencies above and builds the app at
-# `entrypoint` into a single Vercel Function.
+# All Vercel config lives here; there is deliberately NO vercel.json.
+# Its presence made Vercel classify the project as a static site, after
+# which the `functions` key only accepts api/-directory globs and the build
+# failed with "doesn't match any Serverless Functions inside the `api`
+# directory". Vercel's own FastAPI example ships pyproject.toml alone.
 #
-# The frontend build must be declared HERE rather than as `buildCommand` in
-# vercel.json: a buildCommand there takes precedence over the Python build
+# The frontend build belongs in [tool.vercel.scripts] rather than a
+# `buildCommand`: a buildCommand takes precedence over the Python build
 # entirely, so the function is never packaged and every API route 404s.
-# As a script, it runs after dependencies are installed and before deploy,
+# As a script it runs after dependencies install and before deploy,
 # producing frontend/dist for the StaticFiles mount in backend/main.py.
 [tool.vercel]
 entrypoint = "backend.main:app"
