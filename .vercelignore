@@ -12,13 +12,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Frontend sources; only the built output is needed at runtime.
+# Frontend sources are needed at BUILD time (tsc + vite run on Vercel), so
+# only node_modules is excluded -- npm install regenerates it. Excluding
+# tsconfig.json/src/index.html here breaks the build with TS5083.
 frontend/node_modules/
-frontend/src/
-frontend/index.html
-frontend/package-lock.json
-frontend/tsconfig.json
-frontend/vite.config.ts
 *.tsbuildinfo
 
 .git/
