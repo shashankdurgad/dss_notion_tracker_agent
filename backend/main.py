@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from .config import get_settings
 from .deps import AppState
@@ -65,3 +67,20 @@ app.include_router(chat.router)
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+# Serve the built frontend from the same origin as the API.
+#
+# Same-origin matters: the session cookie is SameSite=Lax, so a cross-origin
+# frontend would have it dropped on the OAuth redirect back from Notion.
+# Mounted last so it can't shadow the API routes above. On Vercel these files
+# are promoted to the CDN at build time rather than served by the function.
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if _FRONTEND_DIST.is_dir():
+    app.mount(
+        "/",
+        StaticFiles(directory=_FRONTEND_DIST, html=True),
+        name="frontend",
+    )
+else:
+    logger.info("No frontend build at %s; serving API only", _FRONTEND_DIST)

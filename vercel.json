@@ -1,20 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "cd frontend && npm install && npm run build",
-  "outputDirectory": "frontend/dist",
   "functions": {
     "app.py": {
       "memory": 1024,
       "maxDuration": 300,
-      "excludeFiles": "{tests/**,frontend/node_modules/**,frontend/src/**,.venv/**,.state/**,**/__pycache__/**,**/*.pyc}"
+      "excludeFiles": "{tests/**,frontend/node_modules/**,frontend/src/**,frontend/public/**,.venv/**,.state/**,**/__pycache__/**,**/*.pyc}"
     }
-  },
-  "rewrites": [
-    { "source": "/auth/:path*", "destination": "/app.py" },
-    { "source": "/chat", "destination": "/app.py" },
-    { "source": "/approve", "destination": "/app.py" },
-    { "source": "/reset", "destination": "/app.py" },
-    { "source": "/health", "destination": "/app.py" },
-    { "source": "/((?!assets/).*)", "destination": "/index.html" }
-  ]
+  }
 }
