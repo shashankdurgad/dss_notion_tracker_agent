@@ -23,7 +23,7 @@ async def test_write_pauses_and_does_not_execute():
     agent, mcp = make_agent(
         ScriptedProvider([call_response("notion-update-page", {"page_id": "abc"})])
     )
-    events = [e async for e in agent.send("u1", "edit the page")]
+    events = [e async for e in agent.send("u1", "c1", "edit the page")]
 
     assert any(e["type"] == "approval_required" for e in events)
     # The critical assertion: nothing was written.
@@ -40,10 +40,10 @@ async def test_reject_never_executes():
             ]
         )
     )
-    events = [e async for e in agent.send("u1", "edit")]
+    events = [e async for e in agent.send("u1", "c1", "edit")]
     call_id = next(e["call_id"] for e in events if e["type"] == "approval_required")
 
-    after = [e async for e in agent.resume("u1", call_id, "reject")]
+    after = [e async for e in agent.resume("u1", "c1", call_id, "reject")]
 
     assert mcp.calls == []
     assert any(e["type"] == "tool_rejected" for e in after)
@@ -59,10 +59,10 @@ async def test_approve_executes_once():
             ]
         )
     )
-    events = [e async for e in agent.send("u1", "edit")]
+    events = [e async for e in agent.send("u1", "c1", "edit")]
     call_id = next(e["call_id"] for e in events if e["type"] == "approval_required")
 
-    [e async for e in agent.resume("u1", call_id, "approve")]
+    [e async for e in agent.resume("u1", "c1", call_id, "approve")]
 
     assert mcp.calls == [("notion-update-page", {"page_id": "abc"})]
 
@@ -77,7 +77,7 @@ async def test_reads_execute_without_approval():
             ]
         )
     )
-    events = [e async for e in agent.send("u1", "find minutes")]
+    events = [e async for e in agent.send("u1", "c1", "find minutes")]
 
     assert mcp.calls == [("notion-search", {"query": "minutes"})]
     assert not any(e["type"] == "approval_required" for e in events)
@@ -86,5 +86,5 @@ async def test_reads_execute_without_approval():
 @pytest.mark.asyncio
 async def test_stale_call_id_rejected():
     agent, _ = make_agent(ScriptedProvider([text_response("hi")]))
-    events = [e async for e in agent.resume("u1", "does-not-exist", "approve")]
+    events = [e async for e in agent.resume("u1", "c1", "does-not-exist", "approve")]
     assert events[0]["type"] == "error"

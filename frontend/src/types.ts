@@ -1,4 +1,6 @@
 export type AgentEvent =
+  | { type: "conversation"; conversation_id: string }
+  | { type: "conversation_title"; title: string }
   | { type: "message"; text: string }
   | { type: "tool_start"; tool: string; arguments: Record<string, unknown> }
   | { type: "tool_result"; tool: string; result: string }
@@ -38,4 +40,11 @@ export interface ChatMessage {
 export interface AuthStatus {
   authenticated: boolean;
   workspace_name?: string | null;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
 }

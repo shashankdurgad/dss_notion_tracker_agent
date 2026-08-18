@@ -10,6 +10,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from .agent import NotionAgent
 from .config import Settings, get_settings
+from .conversations import ConversationIndex
 from .llm import build_provider
 from .mcp_client import NotionMCPManager
 from .oauth import NotionOAuthClient
@@ -30,6 +31,11 @@ class AppState:
         self.provider = build_provider(self.settings)
         self.agent = NotionAgent(
             self.settings, self.mcp, self.storage, self.provider
+        )
+        self.conversations = ConversationIndex(
+            self.storage,
+            self.settings.chat_ttl_seconds,
+            self.settings.max_conversations,
         )
         self.serializer = URLSafeSerializer(
             self.settings.session_secret, salt="dss-session"

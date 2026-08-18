@@ -1,15 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  deleteConversation,
   fetchAuthStatus,
+  listConversations,
+  loadConversation,
   logout,
-  resetConversation,
   respondToApproval,
   sendMessage,
 } from "./api";
 import ApprovalCard from "./components/ApprovalCard";
 import LoginGate from "./components/LoginGate";
 import Message from "./components/Message";
-import type { AgentEvent, AuthStatus, ChatMessage } from "./types";
+import Sidebar from "./components/Sidebar";
+import type {
+  AgentEvent,
+  AuthStatus,
+  ChatMessage,
+  Conversation,
+} from "./types";
 
 const SUGGESTIONS = [
   "What did we decide in the last committee meeting?",
@@ -25,14 +33,23 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Read inside the stream loop, which closes over stale state otherwise.
+  const activeIdRef = useRef<string | null>(null);
+  activeIdRef.current = activeId;
 
   const authError = new URLSearchParams(window.location.search).get(
     "auth_error",
   );
 
   useEffect(() => {
-    fetchAuthStatus().then(setAuth);
+    fetchAuthStatus().then((status) => {
+      setAuth(status);
+      if (status.authenticated) listConversations().then(setConversations);
+    });
     // Strip the ?auth=ok / ?auth_error= noise once read.
     if (window.location.search) {
       window.history.replaceState({}, "", window.location.pathname);
@@ -53,6 +70,18 @@ export default function App() {
 
       for await (const event of stream) {
         switch (event.type) {
+          case "conversation":
+            // A new chat gets its id from the server; adopt it so follow-up
+            // messages and approvals land in the same conversation.
+            setActiveId(event.conversation_id);
+            activeIdRef.current = event.conversation_id;
+            listConversations().then(setConversations);
+            break;
+
+          case "conversation_title":
+            listConversations().then(setConversations);
+            break;
+
           case "message":
             patch((m) => ({
               ...m,
@@ -136,7 +165,7 @@ export default function App() {
       setInput("");
       setBusy(true);
       try {
-        await consume(sendMessage(trimmed), assistantId);
+        await consume(sendMessage(trimmed, activeIdRef.current), assistantId);
       } finally {
         setBusy(false);
       }
@@ -152,7 +181,10 @@ export default function App() {
         prev.map((m) => (m.id === messageId ? { ...m, approval: undefined } : m)),
       );
       try {
-        await consume(respondToApproval(callId, decision), messageId);
+        await consume(
+          respondToApproval(callId, decision, activeIdRef.current ?? ""),
+          messageId,
+        );
       } finally {
         setBusy(false);
       }
@@ -160,15 +192,44 @@ export default function App() {
     [consume],
   );
 
-  const startOver = async () => {
-    await resetConversation();
+  const startNewChat = () => {
+    // No server call: the conversation is created when the first message is
+    // sent, so an abandoned "new chat" leaves nothing behind.
+    setActiveId(null);
+    activeIdRef.current = null;
     setMessages([]);
+    setSidebarOpen(false);
+  };
+
+  const openConversation = async (id: string) => {
+    if (busy) return;
+    setActiveId(id);
+    activeIdRef.current = id;
+    setSidebarOpen(false);
+    const history = await loadConversation(id);
+    setMessages(
+      history.map((m) => ({
+        id: nextId(),
+        role: m.role,
+        text: m.text,
+        tools: [],
+      })),
+    );
+  };
+
+  const removeConversation = async (id: string) => {
+    await deleteConversation(id);
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (id === activeIdRef.current) startNewChat();
   };
 
   const signOut = async () => {
     await logout();
     setAuth({ authenticated: false });
     setMessages([]);
+    setConversations([]);
+    setActiveId(null);
+    activeIdRef.current = null;
   };
 
   if (auth === null) {
@@ -179,79 +240,100 @@ export default function App() {
   }
 
   return (
-    <div className="app">
-      <header className="header">
-        <div>
-          <h1>DSS Notion Assistant</h1>
-          {auth.workspace_name && (
-            <span className="workspace">{auth.workspace_name}</span>
-          )}
-        </div>
-        <div className="header-actions">
-          <button onClick={startOver} disabled={busy}>
-            New chat
-          </button>
-          <button onClick={signOut}>Sign out</button>
-        </div>
-      </header>
+    <div className="layout">
+      <Sidebar
+        conversations={conversations}
+        activeId={activeId}
+        open={sidebarOpen}
+        onSelect={openConversation}
+        onNew={startNewChat}
+        onDelete={removeConversation}
+        onClose={() => setSidebarOpen(false)}
+      />
 
-      <main className="thread">
-        {messages.length === 0 && (
-          <div className="empty">
-            <p>Ask anything about the society's Notion workspace.</p>
-            <div className="suggestions">
-              {SUGGESTIONS.map((s) => (
-                <button key={s} onClick={() => submit(s)}>
-                  {s}
-                </button>
-              ))}
+      <div className="app">
+        <header className="header">
+          <div className="header-left">
+            <button
+              className="sidebar-toggle"
+              onClick={() => setSidebarOpen((v) => !v)}
+              aria-label="Toggle saved chats"
+            >
+              ☰
+            </button>
+            <div>
+              <h1>DSS Notion Assistant</h1>
+              {auth.workspace_name && (
+                <span className="workspace">{auth.workspace_name}</span>
+              )}
             </div>
           </div>
-        )}
+          <div className="header-actions">
+            <button onClick={startNewChat} disabled={busy}>
+              New chat
+            </button>
+            <button onClick={signOut}>Sign out</button>
+          </div>
+        </header>
 
-        {messages.map((message) => (
-          <Message key={message.id} message={message}>
-            {message.approval && (
-              <ApprovalCard
-                approval={message.approval}
-                busy={busy}
-                onDecide={(decision) =>
-                  decide(message.id, message.approval!.callId, decision)
-                }
-              />
-            )}
-          </Message>
-        ))}
+        <main className="thread">
+          {messages.length === 0 && (
+            <div className="empty">
+              <p>Ask anything about the society's Notion workspace.</p>
+              <div className="suggestions">
+                {SUGGESTIONS.map((s) => (
+                  <button key={s} onClick={() => submit(s)}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-        {busy && <div className="thinking">Working…</div>}
-        <div ref={bottomRef} />
-      </main>
+          {messages.map((message) => (
+            <Message key={message.id} message={message}>
+              {message.approval && (
+                <ApprovalCard
+                  approval={message.approval}
+                  busy={busy}
+                  onDecide={(decision) =>
+                    decide(message.id, message.approval!.callId, decision)
+                  }
+                />
+              )}
+            </Message>
+          ))}
 
-      <form
-        className="composer"
-        onSubmit={(e) => {
-          e.preventDefault();
-          submit(input);
-        }}
-      >
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submit(input);
-            }
+          {busy && <div className="thinking">Working…</div>}
+          <div ref={bottomRef} />
+        </main>
+
+        <form
+          className="composer"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit(input);
           }}
-          placeholder="Ask about meetings, events, sponsors, action items…"
-          rows={1}
-          disabled={busy}
-          aria-label="Message"
-        />
-        <button type="submit" disabled={busy || !input.trim()}>
-          Send
-        </button>
-      </form>
+        >
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit(input);
+              }
+            }}
+            placeholder="Ask about meetings, events, sponsors, action items…"
+            rows={1}
+            disabled={busy}
+            aria-label="Message"
+          />
+            <button type="submit" disabled={busy || !input.trim()}>
+              Send
+            </button>
+          </form>
+      </div>
     </div>
   );
 }

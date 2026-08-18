@@ -1,4 +1,4 @@
-import type { AgentEvent, AuthStatus } from "./types";
+import type { AgentEvent, AuthStatus, Conversation } from "./types";
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
   const response = await fetch("/auth/status", { credentials: "include" });
@@ -10,8 +10,39 @@ export async function logout(): Promise<void> {
   await fetch("/auth/logout", { method: "POST", credentials: "include" });
 }
 
-export async function resetConversation(): Promise<void> {
-  await fetch("/reset", { method: "POST", credentials: "include" });
+export async function listConversations(): Promise<Conversation[]> {
+  const response = await fetch("/conversations", { credentials: "include" });
+  if (!response.ok) return [];
+  return (await response.json()).conversations ?? [];
+}
+
+export async function loadConversation(
+  id: string,
+): Promise<{ role: "user" | "assistant"; text: string }[]> {
+  const response = await fetch(`/conversations/${id}`, {
+    credentials: "include",
+  });
+  if (!response.ok) return [];
+  return (await response.json()).messages ?? [];
+}
+
+export async function deleteConversation(id: string): Promise<void> {
+  await fetch(`/conversations/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+}
+
+export async function renameConversation(
+  id: string,
+  title: string,
+): Promise<void> {
+  await fetch(`/conversations/${id}/rename`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
 }
 
 /**
@@ -65,13 +96,22 @@ async function* streamEvents(
   }
 }
 
-export function sendMessage(message: string): AsyncGenerator<AgentEvent> {
-  return streamEvents("/chat", { message });
+export function sendMessage(
+  message: string,
+  conversationId: string | null,
+): AsyncGenerator<AgentEvent> {
+  // A null id asks the server to start a new conversation and tell us its id.
+  return streamEvents("/chat", { message, conversation_id: conversationId });
 }
 
 export function respondToApproval(
   callId: string,
   decision: "approve" | "reject",
+  conversationId: string,
 ): AsyncGenerator<AgentEvent> {
-  return streamEvents("/approve", { call_id: callId, decision });
+  return streamEvents("/approve", {
+    call_id: callId,
+    decision,
+    conversation_id: conversationId,
+  });
 }

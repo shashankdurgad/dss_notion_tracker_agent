@@ -55,9 +55,13 @@ class Settings(BaseSettings):
     # refresh tokens die after 30 idle days, so outliving that is pointless.
     session_ttl_seconds: int = 60 * 60 * 24 * 30
 
-    # Conversation history is disposable; expire it so Redis doesn't grow
-    # without bound on the free tier.
-    chat_ttl_seconds: int = 60 * 60 * 12
+    # Saved conversations live as long as the login session, so a chat is
+    # still there next time you sign in. Bounded so Redis can't grow forever
+    # on the free tier.
+    chat_ttl_seconds: int = 60 * 60 * 24 * 30
+
+    # Cap on saved conversations per user; the oldest is dropped beyond this.
+    max_conversations: int = 50
 
     # Refresh the access token this many seconds before it actually expires,
     # so an in-flight request never races the expiry.

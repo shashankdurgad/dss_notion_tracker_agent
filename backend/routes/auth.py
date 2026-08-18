@@ -117,7 +117,11 @@ async def logout(
     if user_id:
         await state.mcp.disconnect(user_id)
         await state.tokens.clear(user_id)
-        await state.agent.reset(user_id)
+        # Signing out clears saved chats too — they're tied to this session's
+        # Notion access, and leaving them behind on a shared machine would
+        # expose workspace content to the next person to sign in.
+        for conversation_id in await state.conversations.clear(user_id):
+            await state.agent.reset(user_id, conversation_id)
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response

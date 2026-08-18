@@ -20,11 +20,11 @@ async def test_history_survives_instance_swap():
     storage = MemoryStorage()
 
     first, _ = make_agent(ScriptedProvider([text_response("Hello there.")]), storage)
-    [e async for e in first.send("alice", "hi")]
+    [e async for e in first.send("alice", "c1", "hi")]
 
     # Simulate a cold start: brand new agent object, same shared storage.
     second, _ = make_agent(ScriptedProvider([text_response("Still here.")]), storage)
-    session = await second.load_session("alice")
+    session = await second.load_session("alice", "c1")
 
     assert len(session.history) == 2  # user turn + assistant reply
     assert session.history[0].text == "hi"
@@ -36,11 +36,11 @@ async def test_users_cannot_see_each_others_chats():
     storage = MemoryStorage()
     agent, _ = make_agent(ScriptedProvider([text_response("ok")]), storage)
 
-    [e async for e in agent.send("alice", "alice-secret")]
-    [e async for e in agent.send("bob", "bob-secret")]
+    [e async for e in agent.send("alice", "c1", "alice-secret")]
+    [e async for e in agent.send("bob", "c1", "bob-secret")]
 
-    alice = str((await agent.load_session("alice")).to_dict())
-    bob = str((await agent.load_session("bob")).to_dict())
+    alice = str((await agent.load_session("alice", "c1")).to_dict())
+    bob = str((await agent.load_session("bob", "c1")).to_dict())
 
     assert "alice-secret" in alice and "bob-secret" not in alice
     assert "bob-secret" in bob and "alice-secret" not in bob
@@ -55,11 +55,11 @@ async def test_pending_approval_survives_instance_swap():
         ScriptedProvider([call_response("notion-update-page", {"page_id": "p1"})]),
         storage,
     )
-    events = [e async for e in first.send("alice", "edit it")]
+    events = [e async for e in first.send("alice", "c1", "edit it")]
     call_id = next(e["call_id"] for e in events if e["type"] == "approval_required")
 
     second, _ = make_agent(ScriptedProvider([text_response("Done.")]), storage)
-    session = await second.load_session("alice")
+    session = await second.load_session("alice", "c1")
 
     assert call_id in session.pending
     pending = session.pending[call_id]

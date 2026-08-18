@@ -189,11 +189,13 @@ class NotionAgent:
         self._provider = provider
 
     @staticmethod
-    def _key(user_id: str) -> str:
-        return f"chat:{user_id}"
+    def _key(user_id: str, conversation_id: str) -> str:
+        return f"chat:{user_id}:{conversation_id}"
 
-    async def load_session(self, user_id: str) -> ChatSession:
-        raw = await self._storage.get(self._key(user_id))
+    async def load_session(
+        self, user_id: str, conversation_id: str
+    ) -> ChatSession:
+        raw = await self._storage.get(self._key(user_id, conversation_id))
         if isinstance(raw, dict):
             try:
                 return ChatSession.from_dict(raw)
@@ -201,15 +203,41 @@ class NotionAgent:
                 logger.warning("Discarding unreadable chat session", exc_info=True)
         return ChatSession()
 
-    async def save_session(self, user_id: str, session: ChatSession) -> None:
+    async def save_session(
+        self, user_id: str, conversation_id: str, session: ChatSession
+    ) -> None:
         await self._storage.set(
-            self._key(user_id),
+            self._key(user_id, conversation_id),
             session.to_dict(),
             ttl_seconds=self._settings.chat_ttl_seconds,
         )
 
-    async def reset(self, user_id: str) -> None:
-        await self._storage.delete(self._key(user_id))
+    async def reset(self, user_id: str, conversation_id: str) -> None:
+        await self._storage.delete(self._key(user_id, conversation_id))
+
+    async def generate_title(self, first_message: str) -> str:
+        """Ask the model for a short title for the sidebar.
+
+        Best-effort: the caller falls back to the user's first message. Uses
+        no tools and caps output, so it stays a cheap single request — this
+        matters on a free tier with a daily request cap.
+        """
+        try:
+            response = await self._provider.generate(
+                system=(
+                    "Write a 3-6 word title summarising the user's request, "
+                    "for a chat sidebar. Reply with the title only: no quotes, "
+                    "no punctuation at the end, no preamble."
+                ),
+                messages=[Message(role="user", text=first_message[:500])],
+                tools=[],
+            )
+        except Exception:  # noqa: BLE001 - never let titling break a chat
+            logger.info("Title generation failed; using fallback", exc_info=True)
+            return ""
+        title = " ".join((response.text or "").split()).strip('"\'' )
+        # A rambling reply means the model ignored the instruction; don't use it.
+        return title[:60] if 0 < len(title) <= 80 else ""
 
     # ---------- tool plumbing ----------
 
@@ -241,8 +269,10 @@ class NotionAgent:
 
     # ---------- main loop ----------
 
-    async def send(self, user_id: str, message: str) -> AsyncIterator[AgentEvent]:
-        session = await self.load_session(user_id)
+    async def send(
+        self, user_id: str, conversation_id: str, message: str
+    ) -> AsyncIterator[AgentEvent]:
+        session = await self.load_session(user_id, conversation_id)
         session.history.append(Message(role="user", text=message))
         try:
             async for event in self._run(user_id, session):
@@ -250,15 +280,16 @@ class NotionAgent:
         finally:
             # Persist even on error or client disconnect, so the rewound
             # history and any parked approval survive to the next request.
-            await self.save_session(user_id, session)
+            await self.save_session(user_id, conversation_id, session)
 
     async def resume(
         self,
         user_id: str,
+        conversation_id: str,
         call_id: str,
         decision: Literal["approve", "reject"],
     ) -> AsyncIterator[AgentEvent]:
-        session = await self.load_session(user_id)
+        session = await self.load_session(user_id, conversation_id)
         pending = session.pending.pop(call_id, None)
         if pending is None:
             yield {"type": "error", "message": "That approval request has expired."}
@@ -303,7 +334,7 @@ class NotionAgent:
             async for event in self._run(user_id, session):
                 yield event
         finally:
-            await self.save_session(user_id, session)
+            await self.save_session(user_id, conversation_id, session)
 
     async def _generate(self, session: ChatSession, tools: list[ToolSpec]):
         """Call the model, retrying transient capacity errors with backoff."""
