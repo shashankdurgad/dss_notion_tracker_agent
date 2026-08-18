@@ -1,4 +1,8 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd frontend && npm install && npm run build"
+  "functions": {
+    "backend/main.py": {
+      "maxDuration": 300
+    }
+  }
 }

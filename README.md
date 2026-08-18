@@ -233,8 +233,8 @@ Then in the app:
 ## Project layout
 
 ```
-app.py            Vercel entrypoint (re-exports backend.main:app)
-vercel.json       routing + function config
+vercel.json       function config (maxDuration)
+pyproject.toml    deps + [tool.vercel] entrypoint and frontend build script
 backend/
   main.py         app entrypoint, CORS, lifespan
   config.py       env settings
