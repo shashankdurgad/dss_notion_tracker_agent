@@ -164,6 +164,49 @@ per-environment. That's usually what you want.
 
 ---
 
+## Switching model provider
+
+Gemini's free tier rate-limits under real use. To fall back to OpenRouter,
+set three variables (locally in `.env`, or in Vercel's dashboard):
+
+```
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
+```
+
+Nothing else changes — the agent loop is provider-agnostic, and stored chat
+history is provider-neutral, so switching mid-conversation is safe.
+
+**The model must support tool calling**, or the agent can't read Notion at
+all. Free models tested against this app's real system prompt on 2026-08-18:
+
+| Model | Result |
+|---|---|
+| `nvidia/nemotron-3-super-120b-a12b:free` | ✅ tools, facts and URLs correct |
+| `nvidia/nemotron-3.5-lightning:free` | ✅ tools, facts and URLs correct |
+| `cohere/north-mini-code:free` | ⚠️ calls tools but ignored the tool result |
+| `google/gemma-4-31b-it:free` | ❌ 429 from the upstream provider |
+| `google/gemma-4-26b-a4b-it:free` | ❌ 429 from the upstream provider |
+
+To re-check what's free and tool-capable (the list changes often):
+
+```bash
+curl -s https://openrouter.ai/api/v1/models | python3 -c \
+"import json,sys; [print(m['id']) for m in json.load(sys.stdin)['data'] \
+if m.get('pricing',{}).get('prompt') in ('0','0.0') \
+and 'tools' in (m.get('supported_parameters') or [])]"
+```
+
+> ⚠️ **Free OpenRouter accounts get 50 requests/day, 20/minute.** One question
+> costs several requests (search → fetch → answer), so that's roughly 12–20
+> questions per day across the whole committee — potentially *tighter* than
+> Gemini's limit. A one-time $10 credit purchase raises it to 1000/day
+> permanently. Free models also occasionally emit malformed citations
+> instead of Notion URLs; observed intermittently, not on every reply.
+
+---
+
 ## Things worth knowing
 
 **`notion-search` requires Notion AI.** If the DSS workspace isn't on a plan
