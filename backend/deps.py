@@ -9,11 +9,11 @@ from fastapi import HTTPException, Request
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from .agent import NotionAgent
-from .config import Settings, get_settings
+from .config import PROVIDER_NOTION, PROVIDER_SHEETS, Settings, get_settings
 from .conversations import ConversationIndex
 from .llm import build_provider
 from .mcp_client import NotionMCPManager
-from .oauth import NotionOAuthClient
+from .oauth import GoogleOAuthClient, NotionOAuthClient
 from .storage import build_storage
 from .tokens import TokenStore
 
@@ -25,8 +25,14 @@ class AppState:
     def __init__(self) -> None:
         self.settings: Settings = get_settings()
         self.storage = build_storage(self.settings)
-        self.oauth = NotionOAuthClient(self.settings, self.storage)
-        self.tokens = TokenStore(self.settings, self.oauth, self.storage)
+        self.oauth_clients = {
+            PROVIDER_NOTION: NotionOAuthClient(self.settings, self.storage),
+            PROVIDER_SHEETS: GoogleOAuthClient(self.settings, self.storage),
+        }
+        # Notion remains the identity provider; kept as `oauth` so existing
+        # call sites (login, callback) read naturally.
+        self.oauth = self.oauth_clients[PROVIDER_NOTION]
+        self.tokens = TokenStore(self.settings, self.oauth_clients, self.storage)
         self.mcp = NotionMCPManager(self.settings, self.tokens)
         self.provider = build_provider(self.settings)
         self.agent = NotionAgent(
@@ -64,19 +70,31 @@ class AppState:
     # in-process dict would fail every sign-in. The TTL expires abandoned
     # authorization attempts without a sweeper.
 
-    async def stash_pkce(self, state: str, verifier: str) -> None:
+    async def stash_pkce(
+        self, state: str, verifier: str, provider: str = PROVIDER_NOTION
+    ) -> None:
         await self.storage.set(
-            f"pkce:{state}", verifier, ttl_seconds=PKCE_TTL_SECONDS
+            f"pkce:{state}",
+            {"verifier": verifier, "provider": provider},
+            ttl_seconds=PKCE_TTL_SECONDS,
         )
 
-    async def take_pkce(self, state: str) -> str | None:
-        """Consume a PKCE verifier. Single-use: a replayed state returns None."""
+    async def take_pkce(self, state: str) -> tuple[str, str] | None:
+        """Consume a PKCE verifier, returning (verifier, provider).
+
+        Single-use: a replayed state returns None, which is the CSRF defence.
+        """
         key = f"pkce:{state}"
-        verifier = await self.storage.get(key)
-        if verifier is None:
+        entry = await self.storage.get(key)
+        if entry is None:
             return None
         await self.storage.delete(key)
-        return verifier if isinstance(verifier, str) else None
+        if isinstance(entry, dict):
+            return entry.get("verifier", ""), entry.get("provider", PROVIDER_NOTION)
+        # Records written before the provider was stored alongside it.
+        if isinstance(entry, str):
+            return entry, PROVIDER_NOTION
+        return None
 
 
 def get_state(request: Request) -> AppState:

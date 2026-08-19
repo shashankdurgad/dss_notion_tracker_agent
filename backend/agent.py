@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Literal
 
 from mcp.types import Tool as MCPTool
 
-from .config import PREFIX_SEPARATOR, Settings
+from .config import PREFIX_SEPARATOR, PROVIDER_NOTION, PROVIDERS, Settings
 from .llm import LLMProvider, Message, ToolCall, ToolSpec
 from .mcp_client import NotionMCPManager
 
@@ -68,21 +68,43 @@ WRITE_HINTS = (
 
 SYSTEM_INSTRUCTION = """\
 You are the UCL Data Science Society (DSS) internal assistant. You answer \
-questions about the society's Notion workspace — committee minutes, event \
-planning, sponsorship threads, action items and task tracking — and you can \
-create or update pages when asked.
+questions about the society's internal records and can update them when asked.
+
+You have two sources, and tool names tell you which is which:
+- `notion__*` — the Notion workspace: committee minutes, event planning, \
+sponsorship threads, action items.
+- `sheets__*` — Google Sheets trackers: structured data like sponsor \
+pipelines, budgets and attendance.
 
 Rules:
-- Ground every factual claim in content you actually retrieved from Notion via \
-the tools. Never invent page contents, decisions, dates, names or numbers.
-- When you reference a page, include its Notion URL so the user can open it.
-- If a search returns nothing relevant, say so plainly and suggest a better \
+- Ground every factual claim in content you actually retrieved via the tools. \
+Never invent page contents, cell values, decisions, dates, names or numbers.
+- When you reference a Notion page, include its URL. When you reference a \
+spreadsheet, name the sheet and the cell range you read.
+- If a lookup returns nothing relevant, say so plainly and suggest a better \
 query rather than guessing.
-- Prefer searching first to locate the right page, then fetching it for detail.
+- For Notion, search first to locate the right page, then fetch it for detail. \
+For Sheets you need a spreadsheet ID — if you don't have one, ask rather than \
+guessing.
+- Some questions span both sources (e.g. cross-checking a tracker against \
+meeting notes). Use both when that's what the question needs.
 - Be concise. Committee members are usually skimming for one specific fact.
-- For writes (creating or editing pages, posting comments), state clearly what \
-you are about to change. The user must approve it before it happens.
+- For writes (editing pages, updating cells, inserting rows, posting \
+comments), state clearly what you are about to change. The user must approve \
+it before it happens.
 """
+
+
+def _split_tool_name(name: str) -> tuple[str, str]:
+    """`sheets__get_values` -> ("sheets", "get_values").
+
+    Unprefixed names fall back to Notion, which keeps older parked writes
+    (persisted before prefixing existed) resolvable.
+    """
+    provider, separator, bare = name.partition(PREFIX_SEPARATOR)
+    if separator and provider in PROVIDERS:
+        return provider, bare
+    return PROVIDER_NOTION, name
 
 
 def _is_write(tool_name: str) -> bool:
@@ -269,20 +291,36 @@ class NotionAgent:
     # ---------- tool plumbing ----------
 
     async def _tools(self, user_id: str) -> list[ToolSpec]:
-        return [self._spec(t) for t in await self._mcp.list_tools(user_id)]
+        """Tools from every connected MCP server, namespaced by provider.
+
+        A failure on one provider must not blank out the other's tools, so
+        each is fetched independently.
+        """
+        specs: list[ToolSpec] = []
+        for provider in await self._mcp.connected_providers(user_id):
+            try:
+                tools = await self._mcp.list_tools(user_id, provider)
+            except Exception:  # noqa: BLE001 - one server down != no tools
+                logger.warning("Could not list %s tools", provider, exc_info=True)
+                continue
+            specs.extend(self._spec(t, provider) for t in tools)
+        return specs
 
     @staticmethod
-    def _spec(tool: MCPTool) -> ToolSpec:
+    def _spec(tool: MCPTool, provider: str) -> ToolSpec:
         # MCP schemas are JSON Schema already; pass through verbatim so the
-        # declarations stay correct as Notion's Beta tool shapes change.
+        # declarations stay correct as the servers' Beta tool shapes change.
+        # The provider prefix is what routes the call back to the right server,
+        # and it survives being persisted in a parked write.
         return ToolSpec(
-            name=tool.name,
+            name=f"{provider}{PREFIX_SEPARATOR}{tool.name}",
             description=tool.description or "",
             parameters=tool.input_schema or {"type": "object"},
         )
 
     async def _execute(self, user_id: str, name: str, args: dict[str, Any]) -> str:
-        result = await self._mcp.call_tool(user_id, name, args)
+        provider, tool_name = _split_tool_name(name)
+        result = await self._mcp.call_tool(user_id, tool_name, args, provider)
         return _result_to_text(result)
 
     @staticmethod

@@ -63,7 +63,9 @@ async def test_pending_approval_survives_instance_swap():
 
     assert call_id in session.pending
     pending = session.pending[call_id]
-    assert pending.tool_name == "notion-update-page"
+    # The provider prefix is stored with the parked write, so the approval
+    # still routes to the right MCP server after a cold start.
+    assert pending.tool_name == "notion__notion-update-page"
     assert pending.arguments == {"page_id": "p1"}
 
 

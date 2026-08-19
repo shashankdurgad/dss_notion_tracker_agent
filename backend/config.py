@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     oauth_redirect_uri: str = "http://localhost:8000/auth/callback"
     frontend_url: str = "http://localhost:5173"
 
+    # Google has no dynamic client registration, so these are created by hand
+    # in Google Cloud Console. Without them the Sheets connection is disabled
+    # rather than failing at request time.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
+    google_scopes: str = GOOGLE_SCOPES
+
     notion_root_page_id: str = ""
     state_dir: Path = Path(".state")
 
@@ -95,6 +103,11 @@ class Settings(BaseSettings):
     @property
     def uses_redis(self) -> bool:
         return bool(self.redis_url and self.redis_token)
+
+    @property
+    def sheets_configured(self) -> bool:
+        """Whether Google Sheets can be offered at all."""
+        return bool(self.google_client_id and self.google_client_secret)
 
     def validate_provider(self) -> None:
         """Fail at startup rather than on the first user message."""

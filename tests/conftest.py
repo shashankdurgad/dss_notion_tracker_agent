@@ -5,31 +5,53 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agent import NotionAgent
+from backend.config import PREFIX_SEPARATOR
 from backend.llm import LLMResponse, ToolCall
 
 
+class FakeTool:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.description = ""
+        self.input_schema = {"type": "object"}
+
+
 class FakeMCP:
-    """Records every tool actually executed."""
+    """Records every tool actually executed, and which server it went to."""
 
-    def __init__(self) -> None:
+    #: provider -> tool names it serves
+    TOOLS = {
+        "notion": ["notion-search", "notion-fetch", "notion-update-page"],
+        "sheets": ["get_values", "get_spreadsheet", "update_values", "insert_dimension"],
+    }
+
+    def __init__(self, providers: list[str] | None = None) -> None:
+        # (tool_name, arguments) — what the old tests assert on.
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        # (provider, tool_name, arguments) — for routing assertions.
+        self.routed: list[tuple[str, str, dict[str, Any]]] = []
+        self._providers = providers if providers is not None else ["notion"]
 
-    async def list_tools(self, user_id: str):
-        class T:
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.description = ""
-                self.input_schema = {"type": "object"}
+    async def connected_providers(self, user_id: str) -> list[str]:
+        return list(self._providers)
 
-        return [T("notion-search"), T("notion-fetch"), T("notion-update-page")]
+    async def list_tools(self, user_id: str, provider: str = "notion"):
+        return [FakeTool(n) for n in self.TOOLS.get(provider, [])]
 
-    async def call_tool(self, user_id: str, name: str, arguments: dict[str, Any]):
+    async def call_tool(
+        self,
+        user_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        provider: str = "notion",
+    ):
         self.calls.append((name, arguments))
+        self.routed.append((provider, name, arguments))
 
         class R:
             is_error = False
             structured_content = None
-            content = [type("B", (), {"text": f"ok:{name}"})()]
+            content = [type("B", (), {"text": f"ok:{provider}:{name}"})()]
 
         return R()
 
@@ -109,4 +131,11 @@ def text_response(text: str) -> LLMResponse:
 
 
 def call_response(name: str, args: dict, call_id: str = "c1") -> LLMResponse:
+    """A model turn requesting one tool.
+
+    Bare names are prefixed with `notion__` to match what the agent now
+    exposes to the model; pass an already-prefixed name to target Sheets.
+    """
+    if PREFIX_SEPARATOR not in name:
+        name = f"notion{PREFIX_SEPARATOR}{name}"
     return LLMResponse(tool_calls=[ToolCall(id=call_id, name=name, arguments=args)])

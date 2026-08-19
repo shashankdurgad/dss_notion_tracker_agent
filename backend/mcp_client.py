@@ -20,7 +20,14 @@ from mcp import ClientSession
 from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from mcp.types import Tool
 
-from .config import NOTION_MCP_URL, USER_AGENT, Settings
+from .config import (
+    GOOGLE_MCP_URL,
+    NOTION_MCP_URL,
+    PROVIDER_NOTION,
+    PROVIDER_SHEETS,
+    USER_AGENT,
+    Settings,
+)
 from .oauth import TerminalAuthError
 from .tokens import TokenStore
 
@@ -45,8 +52,9 @@ class _Request:
 class NotionMCPSession:
     """Owns one live MCP session, driven by a background task."""
 
-    def __init__(self, access_token: str) -> None:
+    def __init__(self, access_token: str, server_url: str = NOTION_MCP_URL) -> None:
         self._access_token = access_token
+        self._server_url = server_url
         self._queue: asyncio.Queue[_Request | None] = asyncio.Queue()
         self._task: asyncio.Task | None = None
         self._ready: asyncio.Future[None] = asyncio.get_event_loop().create_future()
@@ -68,7 +76,7 @@ class NotionMCPSession:
             )
             async with http_client:
                 async with streamable_http_client(
-                    NOTION_MCP_URL, http_client=http_client
+                    self._server_url, http_client=http_client
                 ) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
@@ -141,53 +149,84 @@ class NotionMCPSession:
 
 
 class NotionMCPManager:
-    """Caches one session per user and handles 401 -> refresh -> reconnect."""
+    """Caches sessions per (user, provider) and handles 401 -> refresh -> reconnect."""
 
     def __init__(self, settings: Settings, tokens: TokenStore) -> None:
         self._settings = settings
         self._tokens = tokens
-        self._sessions: dict[str, NotionMCPSession] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._urls = {
+            PROVIDER_NOTION: NOTION_MCP_URL,
+            PROVIDER_SHEETS: GOOGLE_MCP_URL,
+        }
+        self._sessions: dict[tuple[str, str], NotionMCPSession] = {}
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
 
-    def _lock(self, user_id: str) -> asyncio.Lock:
-        return self._locks.setdefault(user_id, asyncio.Lock())
+    def _lock(self, key: tuple[str, str]) -> asyncio.Lock:
+        return self._locks.setdefault(key, asyncio.Lock())
 
-    async def session(self, user_id: str, *, force_new: bool = False) -> NotionMCPSession:
-        async with self._lock(user_id):
-            existing = self._sessions.get(user_id)
+    async def session(
+        self,
+        user_id: str,
+        provider: str = PROVIDER_NOTION,
+        *,
+        force_new: bool = False,
+    ) -> NotionMCPSession:
+        key = (user_id, provider)
+        async with self._lock(key):
+            existing = self._sessions.get(key)
             if existing is not None and not force_new:
                 return existing
             if existing is not None:
                 await existing.close()
-                self._sessions.pop(user_id, None)
+                self._sessions.pop(key, None)
 
-            access_token = await self._tokens.get_access_token(user_id)
-            session = NotionMCPSession(access_token)
+            access_token = await self._tokens.get_access_token(user_id, provider)
+            session = NotionMCPSession(access_token, self._urls[provider])
             await session.start()
-            self._sessions[user_id] = session
+            self._sessions[key] = session
             return session
 
-    async def list_tools(self, user_id: str) -> list[Tool]:
-        return (await self.session(user_id)).tools
+    async def list_tools(
+        self, user_id: str, provider: str = PROVIDER_NOTION
+    ) -> list[Tool]:
+        return (await self.session(user_id, provider)).tools
+
+    async def connected_providers(self, user_id: str) -> list[str]:
+        """Providers this user has a stored grant for."""
+        return [
+            provider
+            for provider in self._urls
+            if await self._tokens.connected(user_id, provider)
+        ]
 
     async def call_tool(
-        self, user_id: str, name: str, arguments: dict[str, Any]
+        self,
+        user_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        provider: str = PROVIDER_NOTION,
     ) -> Any:
-        session = await self.session(user_id)
+        session = await self.session(user_id, provider)
         try:
             return await session.call_tool(name, arguments)
         except MCPUnauthorized:
             # Token died mid-session. Refresh happens inside session(); if the
             # grant itself is dead this raises TerminalAuthError and the caller
             # prompts for re-login. Retry exactly once — never loop.
-            session = await self.session(user_id, force_new=True)
+            session = await self.session(user_id, provider, force_new=True)
             return await session.call_tool(name, arguments)
 
-    async def disconnect(self, user_id: str) -> None:
-        async with self._lock(user_id):
-            session = self._sessions.pop(user_id, None)
-        if session is not None:
-            await session.close()
+    async def disconnect(
+        self, user_id: str, provider: str | None = None
+    ) -> None:
+        """Close cached sessions — one provider's, or all of the user's."""
+        providers = [provider] if provider else list(self._urls)
+        for name in providers:
+            key = (user_id, name)
+            async with self._lock(key):
+                session = self._sessions.pop(key, None)
+            if session is not None:
+                await session.close()
 
     async def shutdown(self) -> None:
         for session in list(self._sessions.values()):

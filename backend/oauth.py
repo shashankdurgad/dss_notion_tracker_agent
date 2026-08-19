@@ -17,7 +17,14 @@ from typing import Any
 
 import httpx
 
-from .config import NOTION_MCP_BASE, USER_AGENT, Settings
+from .config import (
+    GOOGLE_MCP_BASE,
+    NOTION_MCP_BASE,
+    PROVIDER_NOTION,
+    PROVIDER_SHEETS,
+    USER_AGENT,
+    Settings,
+)
 
 DISCOVERY_TIMEOUT = 15.0
 
@@ -108,7 +115,11 @@ class TokenSet:
 
     @classmethod
     def from_token_response(
-        cls, payload: dict[str, Any], *, fallback_refresh: str | None = None
+        cls,
+        payload: dict[str, Any],
+        *,
+        fallback_refresh: str | None = None,
+        account_key: str | None = None,
     ) -> TokenSet:
         # Trust the server's expires_in; never hardcode a lifetime.
         expires_in = float(payload.get("expires_in", 3600))
@@ -118,12 +129,28 @@ class TokenSet:
             # the old one stays valid — keep it rather than dropping the grant.
             refresh_token=payload.get("refresh_token") or fallback_refresh,
             expires_at=time.time() + expires_in,
-            account_key=_account_key(payload),
+            # Supplied by the provider's identity hook. Only Notion sets this:
+            # it owns the app's user identity, and Google attaches to an
+            # existing session rather than minting a competing one.
+            account_key=account_key,
         )
 
 
-class NotionOAuthClient:
-    """Discovery + registration + token operations. Stateless per call."""
+class BaseOAuthClient:
+    """Generic OAuth 2.1 + PKCE client.
+
+    Subclasses supply the provider-specific parts: where the resource
+    metadata lives, how a client_id is obtained (dynamic registration vs
+    static credentials), the scope string, and any extra authorize params.
+    """
+
+    provider: str = ""
+    resource_base: str = ""
+    # Some servers (Google) publish protected-resource metadata under the
+    # resource path rather than the domain root.
+    resource_metadata_path: str = "/.well-known/oauth-protected-resource"
+    # Google publishes OIDC discovery instead of RFC 8414.
+    auth_metadata_paths: tuple[str, ...] = ("/.well-known/oauth-authorization-server",)
 
     def __init__(self, settings: Settings, storage: Any = None) -> None:
         self._settings = settings
@@ -131,6 +158,22 @@ class NotionOAuthClient:
         self._metadata: ServerMetadata | None = None
         self._client_id: str | None = None
         self._client_secret: str | None = None
+
+    # ---------- hooks ----------
+
+    @property
+    def redirect_uri(self) -> str:
+        return self._settings.oauth_redirect_uri
+
+    def scope_for(self, meta: ServerMetadata) -> str:
+        return meta.scope
+
+    def extra_authorize_params(self) -> dict[str, str]:
+        return {}
+
+    @staticmethod
+    def identity_from(payload: dict[str, Any]) -> str | None:
+        return None
 
     # ---------- discovery ----------
 
@@ -142,28 +185,36 @@ class NotionOAuthClient:
             timeout=DISCOVERY_TIMEOUT, headers={"User-Agent": USER_AGENT}
         ) as http:
             # RFC 9728: protected resource metadata points at its auth server(s).
-            auth_base = NOTION_MCP_BASE
+            auth_base = self.resource_base
             try:
                 resource = await http.get(
-                    f"{NOTION_MCP_BASE}/.well-known/oauth-protected-resource"
+                    f"{self.resource_base}{self.resource_metadata_path}"
                 )
                 if resource.status_code == 200:
                     servers = resource.json().get("authorization_servers") or []
                     if servers:
                         auth_base = servers[0].rstrip("/")
             except httpx.HTTPError:
-                # Fall back to the MCP base; the next call is the real check.
+                # Fall back to the resource base; the next call is the real check.
                 pass
 
-            response = await http.get(
-                f"{auth_base}/.well-known/oauth-authorization-server"
-            )
-            if response.status_code != 200:
+            doc = None
+            errors: list[str] = []
+            for path in self.auth_metadata_paths:
+                try:
+                    response = await http.get(f"{auth_base}{path}")
+                except httpx.HTTPError as exc:
+                    errors.append(f"{path}: {exc}")
+                    continue
+                if response.status_code == 200:
+                    doc = response.json()
+                    break
+                errors.append(f"{path}: HTTP {response.status_code}")
+
+            if doc is None:
                 raise OAuthError(
-                    f"OAuth discovery failed at {auth_base} "
-                    f"(HTTP {response.status_code})"
+                    f"OAuth discovery failed at {auth_base} ({'; '.join(errors)})"
                 )
-            doc = response.json()
 
         for required in ("authorization_endpoint", "token_endpoint"):
             if not doc.get(required):
@@ -190,11 +241,13 @@ class NotionOAuthClient:
             return self._client_id
 
         # Shared across instances: on serverless, re-registering per cold start
-        # would leak a new client record on every scale-up.
-        saved = await self._storage.get(CLIENT_REGISTRATION_KEY) if self._storage else None
+        # would leak a new client record on every scale-up. Namespaced by
+        # provider so two providers' registrations can't overwrite each other.
+        key = f"{CLIENT_REGISTRATION_KEY}:{self.provider}"
+        saved = await self._storage.get(key) if self._storage else None
         if isinstance(saved, dict):
             # Registration is bound to the redirect URI; if that changed, redo it.
-            if saved.get("redirect_uri") == self._settings.oauth_redirect_uri:
+            if saved.get("redirect_uri") == self.redirect_uri:
                 self._client_id = saved["client_id"]
                 self._client_secret = saved.get("client_secret")
                 return self._client_id
@@ -202,13 +255,13 @@ class NotionOAuthClient:
         meta = await self.metadata()
         if not meta.registration_endpoint:
             raise OAuthError(
-                "Notion MCP does not advertise a registration endpoint and no "
-                "client_id is configured."
+                f"{self.provider} does not advertise a registration endpoint "
+                f"and no client_id is configured."
             )
 
         payload = {
             "client_name": "DSS Notion Tracker Agent",
-            "redirect_uris": [self._settings.oauth_redirect_uri],
+            "redirect_uris": [self.redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],
             "token_endpoint_auth_method": "none",
@@ -229,11 +282,11 @@ class NotionOAuthClient:
 
         if self._storage:
             await self._storage.set(
-                CLIENT_REGISTRATION_KEY,
+                key,
                 {
                     "client_id": self._client_id,
                     "client_secret": self._client_secret,
-                    "redirect_uri": self._settings.oauth_redirect_uri,
+                    "redirect_uri": self.redirect_uri,
                 },
             )
         return self._client_id
@@ -247,11 +300,12 @@ class NotionOAuthClient:
             {
                 "response_type": "code",
                 "client_id": client_id,
-                "redirect_uri": self._settings.oauth_redirect_uri,
-                "scope": meta.scope,
+                "redirect_uri": self.redirect_uri,
+                "scope": self.scope_for(meta),
                 "state": state,
                 "code_challenge": code_challenge,
                 "code_challenge_method": "S256",
+                **self.extra_authorize_params(),
             }
         )
         return f"{meta.authorization_endpoint}?{params}"
@@ -260,11 +314,14 @@ class NotionOAuthClient:
         data = {
             "grant_type": "authorization_code",
             "code": code,
-            "redirect_uri": self._settings.oauth_redirect_uri,
+            "redirect_uri": self.redirect_uri,
             "client_id": await self.ensure_registered(),
             "code_verifier": code_verifier,
         }
-        return TokenSet.from_token_response(await self._post_token(data))
+        payload = await self._post_token(data)
+        return TokenSet.from_token_response(
+            payload, account_key=self.identity_from(payload)
+        )
 
     async def refresh(self, refresh_token: str) -> TokenSet:
         data = {
@@ -273,6 +330,8 @@ class NotionOAuthClient:
             "client_id": await self.ensure_registered(),
         }
         payload = await self._post_token(data)
+        # Google omits refresh_token on refresh responses and Notion rotates
+        # it; fallback_refresh covers both.
         return TokenSet.from_token_response(payload, fallback_refresh=refresh_token)
 
     async def _post_token(self, data: dict[str, str]) -> dict[str, Any]:
@@ -297,8 +356,67 @@ class NotionOAuthClient:
         # invalid_grant means the grant is gone (rotated token replayed, expired,
         # or revoked). Retrying makes it worse — Notion revokes the whole grant.
         if error_code == "invalid_grant":
-            raise TerminalAuthError("Notion authorization expired; sign in again.")
+            raise TerminalAuthError(
+                f"{self.provider} authorization expired; connect again."
+            )
         raise OAuthError(
             f"Token request failed (HTTP {response.status_code}): "
             f"{response.text[:300]}"
         )
+
+
+class NotionOAuthClient(BaseOAuthClient):
+    """Notion MCP: dynamic client registration, root-level metadata."""
+
+    provider = PROVIDER_NOTION
+    resource_base = NOTION_MCP_BASE
+
+    @staticmethod
+    def identity_from(payload: dict[str, Any]) -> str | None:
+        # Notion owns the app's user identity — see _account_key.
+        return _account_key(payload)
+
+
+class GoogleOAuthClient(BaseOAuthClient):
+    """Google Sheets MCP.
+
+    Differs from Notion in three ways, all discovered by probing the live
+    server: the protected-resource metadata is path-scoped rather than served
+    from the domain root; Google publishes OIDC discovery instead of RFC 8414;
+    and there is no registration endpoint, so credentials are created by hand
+    in Google Cloud Console and supplied via env.
+    """
+
+    provider = PROVIDER_SHEETS
+    resource_base = GOOGLE_MCP_BASE
+    resource_metadata_path = "/.well-known/oauth-protected-resource/mcp/v1"
+    auth_metadata_paths = (
+        "/.well-known/openid-configuration",
+        "/.well-known/oauth-authorization-server",
+    )
+
+    @property
+    def redirect_uri(self) -> str:
+        return self._settings.google_redirect_uri
+
+    def scope_for(self, meta: ServerMetadata) -> str:
+        # Pinned rather than taken from discovery: the server advertises full
+        # `drive`/`spreadsheets`, but drive.file keeps the agent to sheets the
+        # user explicitly picks.
+        return self._settings.google_scopes
+
+    def extra_authorize_params(self) -> dict[str, str]:
+        # Without both of these Google returns no refresh token, and everyone
+        # gets bounced back to consent once the access token expires.
+        return {"access_type": "offline", "prompt": "consent"}
+
+    async def ensure_registered(self) -> str:
+        if not self._settings.google_client_id:
+            raise OAuthError(
+                "Google Sheets is not configured. Set GOOGLE_CLIENT_ID and "
+                "GOOGLE_CLIENT_SECRET (see README — Google has no dynamic "
+                "client registration, so credentials are created by hand)."
+            )
+        self._client_id = self._settings.google_client_id
+        self._client_secret = self._settings.google_client_secret or None
+        return self._client_id

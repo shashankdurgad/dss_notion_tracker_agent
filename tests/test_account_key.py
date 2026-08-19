@@ -7,7 +7,14 @@ and their chats are stranded in storage.
 
 from __future__ import annotations
 
-from backend.oauth import TokenSet, _account_key
+from backend.oauth import NotionOAuthClient, TokenSet, _account_key
+
+
+def _notion_tokens(payload: dict) -> TokenSet:
+    """Build a TokenSet the way the Notion client does, identity included."""
+    return TokenSet.from_token_response(
+        payload, account_key=NotionOAuthClient.identity_from(payload)
+    )
 
 
 def token_payload(**overrides):
@@ -24,22 +31,22 @@ def token_payload(**overrides):
 
 def test_same_account_yields_same_key():
     """Signing out and back in must land on the same id."""
-    first = TokenSet.from_token_response(token_payload())
-    second = TokenSet.from_token_response(token_payload(access_token="at2"))
+    first = _notion_tokens(token_payload())
+    second = _notion_tokens(token_payload(access_token="at2"))
     assert first.account_key == second.account_key
     assert first.account_key
 
 
 def test_different_users_get_different_keys():
-    a = TokenSet.from_token_response(token_payload(user_id="user-a"))
-    b = TokenSet.from_token_response(token_payload(user_id="user-b"))
+    a = _notion_tokens(token_payload(user_id="user-a"))
+    b = _notion_tokens(token_payload(user_id="user-b"))
     assert a.account_key != b.account_key
 
 
 def test_same_user_different_workspace_is_separate():
     """Two workspaces are separate contexts; chats must not merge."""
-    a = TokenSet.from_token_response(token_payload(workspace_id="ws-1"))
-    b = TokenSet.from_token_response(token_payload(workspace_id="ws-2"))
+    a = _notion_tokens(token_payload(workspace_id="ws-1"))
+    b = _notion_tokens(token_payload(workspace_id="ws-2"))
     assert a.account_key != b.account_key
 
 
@@ -64,6 +71,6 @@ def test_missing_identity_falls_back_to_none():
 
 
 def test_account_key_survives_storage_roundtrip():
-    original = TokenSet.from_token_response(token_payload())
+    original = _notion_tokens(token_payload())
     restored = TokenSet.from_dict(original.to_dict())
     assert restored.account_key == original.account_key
