@@ -17,6 +17,28 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 NOTION_MCP_URL = "https://mcp.notion.com/mcp"
 NOTION_MCP_BASE = "https://mcp.notion.com"
 
+# Google's official Sheets MCP server. Its protected-resource metadata is
+# path-scoped (/.well-known/oauth-protected-resource/mcp/v1), not served from
+# the domain root like Notion's — see GoogleOAuthClient.
+GOOGLE_MCP_URL = "https://sheetsmcp.googleapis.com/mcp/v1"
+GOOGLE_MCP_BASE = "https://sheetsmcp.googleapis.com"
+
+# drive.file limits the agent to spreadsheets the user explicitly picks,
+# rather than everything in their Drive.
+GOOGLE_SCOPES = (
+    "https://www.googleapis.com/auth/drive.file "
+    "https://www.googleapis.com/auth/spreadsheets"
+)
+
+PROVIDER_NOTION = "notion"
+PROVIDER_SHEETS = "sheets"
+PROVIDERS = (PROVIDER_NOTION, PROVIDER_SHEETS)
+
+# Tool names are exposed to the model as `<provider>__<tool>` so a call can be
+# routed back to the server that owns it. Double underscore because both
+# Gemini and OpenAI-compatible APIs restrict tool names to [a-zA-Z0-9_.-].
+PREFIX_SEPARATOR = "__"
+
 USER_AGENT = "DSS-Notion-Agent/1.0"
 
 

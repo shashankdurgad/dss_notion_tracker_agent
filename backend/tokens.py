@@ -114,12 +114,15 @@ class TokenStore:
                 await self.clear(user_id)
                 raise
 
-            # Preserve the workspace label across refreshes.
+            # Preserve the workspace label and account key across refreshes.
+            # account_key is the app's user identity — dropping it strands the
+            # user's saved chats on their next sign-in.
             refreshed = TokenSet(
                 access_token=refreshed.access_token,
                 refresh_token=refreshed.refresh_token,
                 expires_at=refreshed.expires_at,
                 workspace_name=current.workspace_name,
+                account_key=current.account_key,
             )
             # Access + rotated refresh are written together; a partial write
             # would strand the grant.
@@ -137,5 +140,6 @@ class TokenStore:
                 refresh_token=tokens.refresh_token,
                 expires_at=tokens.expires_at,
                 workspace_name=name,
+                account_key=tokens.account_key,
             ),
         )

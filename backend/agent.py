@@ -21,7 +21,7 @@ from typing import Any, AsyncIterator, Literal
 
 from mcp.types import Tool as MCPTool
 
-from .config import Settings
+from .config import PREFIX_SEPARATOR, Settings
 from .llm import LLMProvider, Message, ToolCall, ToolSpec
 from .mcp_client import NotionMCPManager
 
@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Tools that mutate the workspace. Everything else is treated as read-only.
 WRITE_TOOLS = {
+    # Notion
     "notion-create-pages",
     "notion-update-page",
     "notion-create-comment",
@@ -37,11 +38,33 @@ WRITE_TOOLS = {
     "notion-create-file-upload",
     "notion-move-pages",
     "notion-duplicate-page",
+    # Google Sheets. insert_dimension is the one the hints below would miss
+    # on its own, and it inserts rows into a live tracker — list it explicitly
+    # as well as adding "insert" to the hints.
+    "insert_dimension",
+    "update_spreadsheet",
+    "update_values",
+    "update_formulas",
 }
 
 # Any tool whose name contains one of these is also treated as a write, so a
 # renamed or newly added mutating tool fails safe rather than running silently.
-WRITE_HINTS = ("create", "update", "delete", "append", "move", "duplicate", "upload")
+WRITE_HINTS = (
+    "create",
+    "update",
+    "delete",
+    "append",
+    "move",
+    "duplicate",
+    "upload",
+    "insert",
+    "set",
+    "write",
+    "clear",
+    "batch",
+    "remove",
+    "add",
+)
 
 SYSTEM_INSTRUCTION = """\
 You are the UCL Data Science Society (DSS) internal assistant. You answer \
@@ -63,7 +86,11 @@ you are about to change. The user must approve it before it happens.
 
 
 def _is_write(tool_name: str) -> bool:
-    if tool_name in WRITE_TOOLS:
+    # Tool names reaching the model are prefixed (`sheets__update_values`) so
+    # they can be routed back to the right MCP server. Compare on the bare
+    # name too, or the explicit WRITE_TOOLS entries would never match.
+    bare = tool_name.split(PREFIX_SEPARATOR, 1)[-1]
+    if tool_name in WRITE_TOOLS or bare in WRITE_TOOLS:
         return True
     lowered = tool_name.lower()
     return any(hint in lowered for hint in WRITE_HINTS)
