@@ -76,6 +76,112 @@ a { color: var(--accent); overflow-wrap: anywhere; }
   font-weight: 600;
 }
 
+/* ---------- onboarding ---------- */
+.onboarding { max-width: 34rem; text-align: left; }
+.onboarding h1 { text-align: center; }
+.onboarding .gate-sub { text-align: center; }
+
+.steps {
+  list-style: none;
+  display: flex;
+  gap: 0.5rem;
+  margin: 0 0 1.5rem;
+  padding: 0;
+}
+.step {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  color: var(--muted);
+  min-width: 0;
+}
+.step-active { border-color: var(--accent); color: var(--text); }
+.step-done { border-color: #4a9d5f; color: var(--text); }
+.step-mark {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  background: var(--border);
+  color: var(--text);
+}
+.step-done .step-mark { background: #4a9d5f; color: #fff; }
+.step-active .step-mark { background: var(--accent); color: #fff; }
+.step-name { font-weight: 600; }
+.step-status {
+  margin-left: auto;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-detail { text-align: center; }
+.step-detail h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+.step-detail p { color: var(--muted); margin: 0 0 1rem; }
+.step-caution {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+  padding: 0.55rem 0.7rem;
+  font-size: 0.85rem;
+  color: var(--text) !important;
+  text-align: left;
+}
+
+/* ---------- connections panel ---------- */
+.connections { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.6rem; }
+.connections-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding: 0 0.35rem 0.15rem;
+}
+.connection {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.3rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+}
+.connection:hover { background: var(--accent-soft); }
+.connection-icon { flex: none; }
+.connection-body { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.connection-name { font-weight: 600; }
+.connection-status {
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-action {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.3rem;
+  text-decoration: none;
+  opacity: 0;
+  flex: none;
+}
+.connection:hover .connection-action,
+.connection-action:focus-visible { opacity: 1; }
+/* Always show "Connect" — an unconnected service shouldn't need a hover to
+   discover how to fix it. */
+a.connection-action { opacity: 1; color: var(--accent); }
+
 /* ---------- layout ---------- */
 .layout { display: flex; min-height: 100vh; }
 
@@ -339,6 +445,29 @@ a { color: var(--accent); overflow-wrap: anywhere; }
   border-radius: 999px;
 }
 .approval-hint { color: var(--muted); font-size: 0.85rem; margin: 0 0 0.6rem; }
+
+/* What the write actually targets — readable without expanding the JSON. */
+.approval-targets {
+  margin: 0 0 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+.approval-targets > div { display: flex; gap: 0.5rem; }
+.approval-targets dt { color: var(--muted); min-width: 6rem; flex: none; }
+.approval-targets dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+
+.approval-raw { margin-bottom: 0.6rem; }
+.approval-raw summary {
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: var(--muted);
+  padding: 0.15rem 0;
+}
+.approval-raw .approval-payload { margin-top: 0.4rem; }
+
+.chip-icon { flex: none; font-size: 0.85rem; }
 .approval-actions { display: flex; gap: 0.5rem; }
 .btn-approve, .btn-reject {
   border-radius: var(--radius);

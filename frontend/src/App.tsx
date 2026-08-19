@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   clearAllConversations,
   deleteConversation,
+  disconnectService,
   fetchAuthStatus,
   listConversations,
   loadConversation,
@@ -10,14 +11,15 @@ import {
   sendMessage,
 } from "./api";
 import ApprovalCard from "./components/ApprovalCard";
-import LoginGate from "./components/LoginGate";
 import Message from "./components/Message";
+import Onboarding from "./components/Onboarding";
 import Sidebar from "./components/Sidebar";
 import type {
   AgentEvent,
   AuthStatus,
   ChatMessage,
   Conversation,
+  ServiceId,
 } from "./types";
 
 const SUGGESTIONS = [
@@ -42,16 +44,16 @@ export default function App() {
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
 
-  const authError = new URLSearchParams(window.location.search).get(
-    "auth_error",
-  );
+  const params = new URLSearchParams(window.location.search);
+  const authError = params.get("auth_error");
+  const errorService = params.get("service");
 
   useEffect(() => {
     fetchAuthStatus().then((status) => {
       setAuth(status);
-      if (status.authenticated) listConversations().then(setConversations);
+      if (status.setup_complete) listConversations().then(setConversations);
     });
-    // Strip the ?auth=ok / ?auth_error= noise once read.
+    // Strip the ?connected= / ?auth_error= noise once read.
     if (window.location.search) {
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -141,7 +143,9 @@ export default function App() {
             break;
 
           case "auth_required":
-            setAuth({ authenticated: false });
+            // A grant died mid-turn. Re-read status so onboarding resumes at
+            // whichever service actually needs reconnecting.
+            fetchAuthStatus().then(setAuth);
             break;
 
           case "done":
@@ -230,9 +234,22 @@ export default function App() {
     startNewChat();
   };
 
+  const disconnect = async (service: ServiceId) => {
+    await disconnectService(service);
+    const status = await fetchAuthStatus();
+    setAuth(status);
+    if (!status.setup_complete) {
+      // Onboarding takes over; clear the open chat so it isn't showing
+      // behind a service the user just revoked.
+      setMessages([]);
+      setActiveId(null);
+      activeIdRef.current = null;
+    }
+  };
+
   const signOut = async () => {
     await logout();
-    setAuth({ authenticated: false });
+    setAuth(await fetchAuthStatus());
     setMessages([]);
     setConversations([]);
     setActiveId(null);
@@ -242,8 +259,16 @@ export default function App() {
   if (auth === null) {
     return <div className="loading">Loading…</div>;
   }
-  if (!auth.authenticated) {
-    return <LoginGate authError={authError} />;
+  // Gate on setup_complete, not just authentication: a user who connected
+  // Notion but not Sheets resumes onboarding at the step they stopped on.
+  if (!auth.setup_complete) {
+    return (
+      <Onboarding
+        status={auth}
+        authError={authError}
+        errorService={errorService}
+      />
+    );
   }
 
   return (
@@ -257,6 +282,8 @@ export default function App() {
         onDelete={removeConversation}
         onClearAll={clearAll}
         onClose={() => setSidebarOpen(false)}
+        status={auth}
+        onDisconnect={disconnect}
       />
 
       <div className="app">

@@ -37,9 +37,22 @@ export interface ChatMessage {
   error?: string;
 }
 
+export type ServiceId = "notion" | "sheets";
+
+export interface ServiceConnection {
+  connected: boolean;
+  required: boolean;
+  /** False when the deployment has no credentials configured for it. */
+  available?: boolean;
+  account?: string | null;
+}
+
 export interface AuthStatus {
   authenticated: boolean;
+  /** Every required service connected — the gate for reaching the chat. */
+  setup_complete: boolean;
   workspace_name?: string | null;
+  connections: Record<ServiceId, ServiceConnection>;
 }
 
 export interface Conversation {

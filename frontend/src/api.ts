@@ -1,9 +1,36 @@
-import type { AgentEvent, AuthStatus, Conversation } from "./types";
+import type {
+  AgentEvent,
+  AuthStatus,
+  Conversation,
+  ServiceId,
+} from "./types";
+
+const DISCONNECTED: AuthStatus = {
+  authenticated: false,
+  setup_complete: false,
+  connections: {
+    notion: { connected: false, required: true },
+    sheets: { connected: false, required: true },
+  },
+};
 
 export async function fetchAuthStatus(): Promise<AuthStatus> {
-  const response = await fetch("/auth/status", { credentials: "include" });
-  if (!response.ok) return { authenticated: false };
-  return response.json();
+  try {
+    const response = await fetch("/auth/status", { credentials: "include" });
+    if (!response.ok) return DISCONNECTED;
+    return await response.json();
+  } catch {
+    // Offline or the backend is down — render the gate rather than a blank
+    // screen while `auth` sits at null forever.
+    return DISCONNECTED;
+  }
+}
+
+export async function disconnectService(service: ServiceId): Promise<void> {
+  await fetch(`/auth/${service}/disconnect`, {
+    method: "POST",
+    credentials: "include",
+  });
 }
 
 export async function logout(): Promise<void> {

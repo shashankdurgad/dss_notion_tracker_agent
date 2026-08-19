@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { Conversation } from "../types";
+import Connections from "./Connections";
+import type { AuthStatus, Conversation, ServiceId } from "../types";
 
 interface Props {
   conversations: Conversation[];
@@ -10,6 +11,8 @@ interface Props {
   onDelete: (id: string) => void;
   onClearAll: () => void;
   onClose: () => void;
+  status: AuthStatus;
+  onDisconnect: (service: ServiceId) => void;
 }
 
 function groupLabel(updatedAt: number): string {
@@ -30,6 +33,8 @@ export default function Sidebar({
   onDelete,
   onClearAll,
   onClose,
+  status,
+  onDisconnect,
 }: Props) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [confirmClearAll, setConfirmClearAll] = useState(false);
@@ -107,9 +112,11 @@ export default function Sidebar({
           ))}
         </nav>
 
-        {conversations.length > 0 && (
-          <div className="sidebar-footer">
-            {confirmClearAll ? (
+        <div className="sidebar-footer">
+          <Connections status={status} onDisconnect={onDisconnect} />
+
+          {conversations.length > 0 && (
+            <>{confirmClearAll ? (
               <>
                 <span className="clear-warn">Delete all saved chats?</span>
                 <div className="chat-confirm">
@@ -126,16 +133,17 @@ export default function Sidebar({
                   </button>
                 </div>
               </>
-            ) : (
-              <button
-                className="clear-all"
-                onClick={() => setConfirmClearAll(true)}
-              >
-                Clear all chats
-              </button>
-            )}
-          </div>
-        )}
+              ) : (
+                <button
+                  className="clear-all"
+                  onClick={() => setConfirmClearAll(true)}
+                >
+                  Clear all chats
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </aside>
     </>
   );
