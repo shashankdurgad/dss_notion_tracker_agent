@@ -1,10 +1,12 @@
-# DSS Notion Tracker Agent
+# DSS Tracker Agent
 
-A chatbot over UCL Data Science Society's Notion workspace. Ask questions about
-committee minutes, events, sponsors and action items in plain English — and let
-the agent create or update pages, with your approval.
+A chatbot over UCL Data Science Society's internal records — the **Notion**
+workspace (committee minutes, events, sponsors, action items) and **Google
+Sheets** trackers. Ask in plain English, and let the agent update them with
+your approval.
 
-Built on Notion's hosted **MCP** server and **Gemini**.
+Built on Notion's and Google's hosted **MCP** servers, powered by **Gemini** or
+any OpenAI-compatible model.
 
 ---
 
@@ -15,28 +17,44 @@ Browser (React)
    │  SSE
    ▼
 FastAPI backend
-   ├── /auth/*   OAuth 2.1 (discovery → DCR → PKCE → tokens)
-   ├── /chat     Gemini agent loop
+   ├── /auth/*   OAuth 2.1 + PKCE, one grant per service
+   ├── /chat     agent loop
    └── /approve  resolves a pending write
    │
-   ├── Gemini (google-genai)
-   └── MCP client ──Bearer──▶ https://mcp.notion.com/mcp
+   ├── Model (Gemini or OpenRouter)
+   ├── MCP ──Bearer──▶ https://mcp.notion.com/mcp
+   └── MCP ──Bearer──▶ https://sheetsmcp.googleapis.com/mcp/v1
 ```
 
-Each member signs in with **their own Notion account**, so the agent can only
-see pages that person already has access to. Tokens live encrypted on the
-server and are never exposed to the browser.
+Each member connects **their own accounts**, so the agent only ever sees what
+that person can already see. Tokens are encrypted on the server and never
+reach the browser.
+
+Tools are namespaced per service (`notion__notion-search`,
+`sheets__get_values`), which is what routes each call back to the right server
+— including for a write parked awaiting approval across a restart.
+
+**Notion is the identity.** Signing in with Notion establishes the session;
+Google Sheets attaches to it as a second grant. Both are required before the
+chat is usable.
 
 ### The approval gate
 
 Automatic function calling is deliberately **disabled**. If the SDK ran tools
-for us, a page edit would land before anyone could review it. Instead the loop
-is driven manually:
+for us, an edit would land before anyone could review it. Instead the loop is
+driven manually:
 
-- **Reads** (`notion-search`, `notion-fetch`, …) run immediately, in parallel.
-- **Writes** (`notion-create-pages`, `notion-update-page`, `notion-create-comment`, …)
-  suspend the turn. The exact payload is shown in the UI and nothing reaches
-  Notion until you press **Approve**.
+- **Reads** (`notion-search`, `notion-fetch`, `get_values`, …) run immediately,
+  in parallel.
+- **Writes** (`notion-update-page`, `update_values`, `insert_dimension`, …)
+  suspend the turn. The target — page, or spreadsheet and cell range — is shown
+  in the UI, and nothing is written until you press **Approve**.
+
+Classification fails safe: alongside an explicit list, any tool whose name
+contains `create`/`update`/`delete`/`insert`/`set`/`write`/`clear`/`batch`/
+`append`/`move`/`duplicate`/`upload`/`remove`/`add` is treated as a write. That
+matters because a tool like `insert_dimension` doesn't read as destructive from
+its name alone, but adds rows to a live tracker.
 
 A rejected write is reported back to the model as declined, so it responds
 sensibly instead of assuming success. Tool classification also fails safe: any
@@ -83,11 +101,68 @@ python -m venv .venv && .venv/bin/pip install -e .
 cd frontend && npm install && npm run dev
 ```
 
-Open <http://localhost:5173> and click **Connect Notion**.
+Open <http://localhost:5173> and follow the setup steps: **Connect Notion**,
+then **Connect Google Sheets**.
 
-No Notion integration needs creating by hand — the backend registers itself
-with Notion's MCP server automatically via Dynamic Client Registration on first
-boot, and caches the resulting `client_id` in `.state/`.
+Notion needs no manual setup — the backend registers itself via Dynamic Client
+Registration on first boot. Google does: see
+[Connecting Google Sheets](#connecting-google-sheets). Leave
+`GOOGLE_CLIENT_ID` blank and the Sheets step is skipped entirely, so the app
+still runs Notion-only.
+
+---
+
+## Connecting Google Sheets
+
+Notion registers its own OAuth client automatically. **Google doesn't** — it
+has no dynamic client registration, so you create credentials by hand once.
+
+### 1. Create an OAuth client
+
+1. [Google Cloud Console](https://console.cloud.google.com) → create or pick a project
+2. **APIs & Services → Library** → enable **Google Sheets API** and **Google Drive API**
+3. **OAuth consent screen** → External → fill in app name and support email
+4. Add these scopes:
+   - `https://www.googleapis.com/auth/drive.file`
+   - `https://www.googleapis.com/auth/spreadsheets`
+5. Add committee members under **Test users** (see the 100-user cap below)
+6. **Credentials → Create credentials → OAuth client ID → Web application**
+7. Under **Authorised redirect URIs** add, matching `GOOGLE_REDIRECT_URI` exactly:
+   - `http://localhost:8000/auth/google/callback` for local dev
+   - `https://<your-app>.vercel.app/auth/google/callback` for production
+
+Copy the client ID and secret into `.env` (and Vercel's env vars):
+
+```
+GOOGLE_CLIENT_ID=...apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=...
+GOOGLE_REDIRECT_URI=https://<your-app>.vercel.app/auth/google/callback
+```
+
+> A mismatch between `GOOGLE_REDIRECT_URI` and the URI registered in Console
+> is the most common failure, and shows up as `redirect_uri_mismatch` on
+> Google's own error page.
+
+### 2. What members will see
+
+Google shows an **"app isn't verified"** warning for these scopes. That's
+expected for an internal tool — the onboarding screen says so before sending
+people there, and they continue via **Advanced → Go to DSS Assistant**.
+
+Two consequences worth knowing:
+
+- **100-user cap** while unverified. Fine for a committee; verification is
+  needed only if DSS opens this up more widely.
+- **`drive.file` is deliberately narrow.** The agent can only see spreadsheets
+  the user explicitly opens or creates through the app — it **cannot search
+  Drive by name**. Paste a spreadsheet link or ID the first time; broader
+  access would mean full-Drive scopes and a heavier verification path.
+
+### Which tools the agent gets
+
+`get_values`, `get_spreadsheet` (reads, run automatically) and
+`update_values`, `update_formulas`, `update_spreadsheet`, `insert_dimension`
+(writes, all gated behind approval).
 
 ---
 
@@ -139,8 +214,14 @@ In the Vercel dashboard → Settings → Environment Variables:
 | `REDIS_TOKEN` | Upstash REST token |
 | `OAUTH_REDIRECT_URI` | `https://<your-app>.vercel.app/auth/callback` |
 | `FRONTEND_URL` | `https://<your-app>.vercel.app` |
+| `GOOGLE_CLIENT_ID` | from Google Cloud Console |
+| `GOOGLE_CLIENT_SECRET` | from Google Cloud Console |
+| `GOOGLE_REDIRECT_URI` | `https://<your-app>.vercel.app/auth/google/callback` |
 
-Generate **fresh** secrets for production — don't reuse your local ones.
+Generate **fresh** secrets for production — don't reuse your local ones. Add
+the production `GOOGLE_REDIRECT_URI` to the credential's authorised redirect
+URIs in Google Cloud Console, or Sheets consent fails there while working
+locally.
 
 ### 4. Redeploy
 
@@ -261,9 +342,11 @@ you're prompted to sign in again; it is never retried.
 | `GEMINI_API_KEY` | — | **Required.** Gemini API key |
 | `GEMINI_MODEL` | `gemini-3.7-flash` | Model for the agent loop |
 | `SESSION_SECRET` | — | **Required.** Signs the session cookie |
-| `TOKEN_ENC_KEY` | — | **Required.** Fernet key encrypting Notion tokens |
-| `OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/callback` | Must match exactly |
+| `TOKEN_ENC_KEY` | — | **Required.** Fernet key encrypting stored tokens |
+| `OAUTH_REDIRECT_URI` | `http://localhost:8000/auth/callback` | Notion. Must match exactly |
 | `FRONTEND_URL` | `http://localhost:5173` | CORS origin + post-auth redirect |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | — | Google OAuth client. Blank hides the Sheets connection |
+| `GOOGLE_REDIRECT_URI` | `http://localhost:8000/auth/google/callback` | Must be registered in Google Cloud Console verbatim |
 | `REDIS_URL` / `REDIS_TOKEN` | — | Upstash REST credentials. Set both for serverless; blank uses a local file |
 | `NOTION_ROOT_PAGE_ID` | — | Fallback root page when search is unavailable |
 | `STATE_DIR` | `.state` | Local-only state directory when Redis isn't configured |
@@ -273,21 +356,29 @@ you're prompted to sign in again; it is never retried.
 ## Verifying it works
 
 ```bash
-# OAuth endpoints are live and discoverable
+# Both MCP servers are live and discoverable
 curl -s https://mcp.notion.com/.well-known/oauth-authorization-server | python -m json.tool
+curl -s https://sheetsmcp.googleapis.com/.well-known/oauth-protected-resource/mcp/v1 | python -m json.tool
 ```
 
 Then in the app:
 
-1. **Sign in** → you land back authenticated with the workspace name in the header.
-   Check DevTools → Application → Cookies: the session cookie is `HttpOnly` and
-   contains no Notion token.
-2. **Read** → "What's in our latest committee meeting notes?" Tool chips appear
-   and the answer cites real Notion URLs.
-3. **Write, rejected** → "Add an action item to the meeting notes." An approval
-   card shows the exact payload. Press **Reject** → nothing changes in Notion.
-4. **Write, approved** → ask again, press **Approve** → the page updates. Verify
-   in Notion.
+1. **Onboarding** → connect Notion, then Google Sheets. Refresh mid-flow: it
+   resumes at the step you stopped on. In DevTools → Application → Cookies, the
+   session cookie is `HttpOnly` and contains no service token.
+2. **Read Notion** → "What's in our latest committee meeting notes?" Tool chips
+   appear and the answer cites real page URLs.
+3. **Read Sheets** → "What's in the sponsorship tracker?" (paste the sheet link
+   the first time — `drive.file` can't search Drive by name).
+4. **Write, rejected** → "Mark Acme as confirmed." The approval card names the
+   spreadsheet and range. Press **Reject** → **check the sheet: nothing changed.**
+5. **Write, approved** → ask again, press **Approve** → the cell updates.
+6. **Row insert** → "Add a row to the tracker" must *also* prompt for approval,
+   not run straight away.
+7. **Cross-service** → "Cross-check the tracker against the sponsor page in
+   Notion" → chips from both services in one turn.
+8. **Disconnect Sheets** in the sidebar → Sheets tools disappear and onboarding
+   asks for it again; Notion stays connected.
 
 ---
 
@@ -300,14 +391,17 @@ backend/
   main.py         app entrypoint, CORS, lifespan
   config.py       env settings
   storage.py      Redis / local-file key-value backends
-  oauth.py        discovery, DCR, PKCE, token exchange/refresh
-  tokens.py       encrypted store + per-user refresh mutex
-  mcp_client.py   Notion MCP session manager
-  agent.py        Gemini loop + approval gate
+  oauth.py        BaseOAuthClient + Notion (DCR) and Google (static creds)
+  tokens.py       encrypted store, keyed per (user, service)
+  mcp_client.py   MCP sessions, one per (user, service)
+  agent.py        model loop + approval gate + tool routing
+  conversations.py saved-chat index
+  llm.py          Gemini / OpenRouter behind one interface
   deps.py         app state, session cookie, PKCE stash
   routes/         auth.py, chat.py
 frontend/src/
   App.tsx         chat state machine
   api.ts          SSE client
-  components/     LoginGate, Message, ToolChip, ApprovalCard
+  services.ts     per-service metadata (names, blurbs, connect paths)
+  components/     Onboarding, Connections, Message, ToolChip, ApprovalCard, Sidebar
 ```
