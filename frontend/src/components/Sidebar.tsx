@@ -8,6 +8,7 @@ interface Props {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  onClearAll: () => void;
   onClose: () => void;
 }
 
@@ -27,9 +28,11 @@ export default function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onClearAll,
   onClose,
 }: Props) {
   const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
 
   // Conversations arrive newest-first, so grouping in order preserves that.
   const groups: { label: string; items: Conversation[] }[] = [];
@@ -103,6 +106,36 @@ export default function Sidebar({
             </div>
           ))}
         </nav>
+
+        {conversations.length > 0 && (
+          <div className="sidebar-footer">
+            {confirmClearAll ? (
+              <>
+                <span className="clear-warn">Delete all saved chats?</span>
+                <div className="chat-confirm">
+                  <button
+                    onClick={() => {
+                      onClearAll();
+                      setConfirmClearAll(false);
+                    }}
+                  >
+                    Delete all
+                  </button>
+                  <button onClick={() => setConfirmClearAll(false)}>
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button
+                className="clear-all"
+                onClick={() => setConfirmClearAll(true)}
+              >
+                Clear all chats
+              </button>
+            )}
+          </div>
+        )}
       </aside>
     </>
   );

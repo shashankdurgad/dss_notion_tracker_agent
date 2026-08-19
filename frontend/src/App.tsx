@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  clearAllConversations,
   deleteConversation,
   fetchAuthStatus,
   listConversations,
@@ -223,6 +224,12 @@ export default function App() {
     if (id === activeIdRef.current) startNewChat();
   };
 
+  const clearAll = async () => {
+    await clearAllConversations();
+    setConversations([]);
+    startNewChat();
+  };
+
   const signOut = async () => {
     await logout();
     setAuth({ authenticated: false });
@@ -248,6 +255,7 @@ export default function App() {
         onSelect={openConversation}
         onNew={startNewChat}
         onDelete={removeConversation}
+        onClearAll={clearAll}
         onClose={() => setSidebarOpen(false)}
       />
 

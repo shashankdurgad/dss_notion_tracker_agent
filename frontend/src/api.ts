@@ -26,6 +26,13 @@ export async function loadConversation(
   return (await response.json()).messages ?? [];
 }
 
+export async function clearAllConversations(): Promise<void> {
+  await fetch("/conversations/clear", {
+    method: "POST",
+    credentials: "include",
+  });
+}
+
 export async function deleteConversation(id: string): Promise<void> {
   await fetch(`/conversations/${id}`, {
     method: "DELETE",

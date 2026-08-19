@@ -60,7 +60,10 @@ async def callback(
         logger.warning("Token exchange failed: %s", exc)
         return RedirectResponse(f"{frontend}?auth_error=exchange_failed", status_code=307)
 
-    user_id = state.new_user_id()
+    # Reuse the same id when this Notion account signs in again, so saved
+    # chats reattach instead of being stranded under a fresh random id.
+    # Falls back to a random id if Notion returned no identity fields.
+    user_id = tokens.account_key or state.new_user_id()
     await state.tokens.save(user_id, tokens)
 
     # Identify the workspace so the UI can show which Notion this is.
@@ -117,11 +120,10 @@ async def logout(
     if user_id:
         await state.mcp.disconnect(user_id)
         await state.tokens.clear(user_id)
-        # Signing out clears saved chats too — they're tied to this session's
-        # Notion access, and leaving them behind on a shared machine would
-        # expose workspace content to the next person to sign in.
-        for conversation_id in await state.conversations.clear(user_id):
-            await state.agent.reset(user_id, conversation_id)
+        # Saved chats are deliberately kept: signing out revokes access to
+        # Notion, and they reattach when the same account signs back in.
+        # Nothing is readable meanwhile — the tokens are gone, and reaching
+        # the chats at all requires completing OAuth as that same account.
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response

@@ -38,6 +38,22 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+def _account_key(payload: dict[str, Any]) -> str | None:
+    """Derive a stable per-account id from Notion's token response.
+
+    Lets a returning user reattach their saved chats instead of getting a
+    fresh random identity on every sign-in. Hashed so raw Notion identifiers
+    never become storage keys, and scoped to workspace + user so two people
+    sharing a workspace never share chats.
+    """
+    raw_user = payload.get("user_id") or (payload.get("owner") or {}).get("user", {}).get("id")
+    workspace = payload.get("workspace_id") or ""
+    if not raw_user:
+        return None
+    digest = hashlib.sha256(f"{workspace}:{raw_user}".encode()).hexdigest()
+    return digest[:32]
+
+
 def generate_pkce_pair() -> tuple[str, str]:
     """Return (code_verifier, code_challenge) using S256."""
     verifier = _b64url(secrets.token_bytes(32))
@@ -64,6 +80,9 @@ class TokenSet:
     refresh_token: str | None
     expires_at: float
     workspace_name: str | None = None
+    # Stable identity from Notion, used to reattach saved chats when the same
+    # person signs in again. None if Notion didn't return identity fields.
+    account_key: str | None = None
 
     def is_expiring(self, skew_seconds: int) -> bool:
         return time.time() >= (self.expires_at - skew_seconds)
@@ -74,6 +93,7 @@ class TokenSet:
             "refresh_token": self.refresh_token,
             "expires_at": self.expires_at,
             "workspace_name": self.workspace_name,
+            "account_key": self.account_key,
         }
 
     @classmethod
@@ -83,6 +103,7 @@ class TokenSet:
             refresh_token=data.get("refresh_token"),
             expires_at=data["expires_at"],
             workspace_name=data.get("workspace_name"),
+            account_key=data.get("account_key"),
         )
 
     @classmethod
@@ -97,6 +118,7 @@ class TokenSet:
             # the old one stays valid — keep it rather than dropping the grant.
             refresh_token=payload.get("refresh_token") or fallback_refresh,
             expires_at=time.time() + expires_in,
+            account_key=_account_key(payload),
         )
 
 
